@@ -1,0 +1,21 @@
+# Render Blueprint: 1 Web Service (FastAPI + game WebAssembly) + 1 PostgreSQL (tamaweb_db)
+services:
+  - type: web
+    name: 4thmay-nuoi-thu-cung-ao
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: cd server && uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tamaweb-db
+          property: connectionString
+
+databases:
+  - name: tamaweb-db
+    databaseName: tamaweb_db
+    plan: free
