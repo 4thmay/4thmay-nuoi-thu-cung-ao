@@ -2024,8 +2024,12 @@ class TamawebApp:
 
                 self.sound.play("cheer_success")
                 self.is_authenticated = True
-                self.menu_state = "welcome_back"
-                self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
+                if self.pet.stage == 0:
+                    self.menu_state = None
+                    self.show_toast("QUẢ TRỨNG SẮP NỞ RỒI!")
+                else:
+                    self.menu_state = "welcome_back"
+                    self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
                 self.auth_msg = ""
             else:
                 raw_err = data.get("detail") or data.get("message") or ""
@@ -2349,6 +2353,16 @@ class TamawebApp:
                     self.pet.scene = "home"
                     self.pet.active_npc = None
                     self.sound.play("click")
+                    return
+
+                if self.pet.stage == 0:
+                    self.pet.egg_timer += 1.5
+                    self.sound.play("click")
+                    if self.pet.egg_timer >= 5.0:
+                        self.pet.hatch()
+                        self.show_toast("TRỨNG ĐÃ NỞ RỒI!")
+                    else:
+                        self.show_toast("TRỨNG ĐANG SẮP NỞ...")
                     return
 
                 cs = STAGE_INFO[self.pet.stage]["size"]

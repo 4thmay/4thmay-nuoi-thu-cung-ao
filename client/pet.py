@@ -68,11 +68,12 @@ class Pet:
     def __init__(self, sound_mgr=None):
         self.sound = sound_mgr
         self.name = "TAMAGOTCHI"
-        self.stage = 1  # 0: Egg, 1: Baby, 2: Child, 3: Teen, 4: Adult, 5: Elder
+        self.stage = 0  # 0: Egg, 1: Baby, 2: Child, 3: Teen, 4: Adult, 5: Elder
         self.generation = 1
         self.gender = random.choice(["BÉ TRAI", "BÉ GÁI"])
         self.char_idx = 0
-        self.character_file = STAGE_CHARACTERS[1][0]
+        self.character_file = STAGE_CHARACTERS[0][0]
+        self.egg_timer = 0.0
         self.level = 1
         self.exp = 0
         self.gold = 350
@@ -224,7 +225,7 @@ class Pet:
         chars = STAGE_CHARACTERS.get(self.stage, STAGE_CHARACTERS[1])
         self.char_idx = self.char_idx % len(chars)
         self.character_file = chars[self.char_idx]
-        if self.character_file not in self.unlocked_characters:
+        if self.stage > 0 and self.character_file not in self.unlocked_characters:
             self.unlocked_characters.append(self.character_file)
         self.spritesheet = SpriteSheet(self.character_file, info["size"], info["cols"], info["rows"])
         self.offset_y = info["offset_y"]
@@ -310,6 +311,16 @@ class Pet:
                 p["y"] += p["vy"] * dt
                 alive_particles.append(p)
         self.particles = alive_particles
+
+        # Xử lý giai đoạn ấp trứng -> nở thành nhân vật Sơ sinh
+        if self.stage == 0:
+            self.egg_timer += dt
+            cs = STAGE_INFO[0]["size"]
+            self.x = 48.0 - cs // 2
+            self.y = 96 - cs - 10 + STAGE_INFO[0]["offset_y"]
+            if self.egg_timer >= 5.0:
+                self.hatch()
+            return
 
         # Xử lý các hoạt cảnh đặc biệt
         if self.scripted_mode:
@@ -531,21 +542,36 @@ class Pet:
                     "partner_sprite": partner["sprite"],
                 })
                 self.generation += 1
-                self.stage = 1
-                self.char_idx = random.randint(0, len(STAGE_CHARACTERS[1]) - 1)
+                self.stage = 0
+                self.egg_timer = 0.0
+                self.char_idx = 0
                 self._load_stage_sprite()
                 self.scripted_mode = None
                 self.active_npc = None
                 self.scene = "home"
-                self.x = 48 - STAGE_INFO[1]["size"] // 2
+                self.x = 48 - STAGE_INFO[0]["size"] // 2
                 self.spawn_hearts(6)
                 if self.sound:
-                    self.sound.play("hatch")
+                    self.sound.play("click")
 
         elif self.scripted_mode in ("praising", "petting", "scolding"):
             if self.scripted_timer >= 2.2:
                 self.scripted_mode = None
                 self.set_state("idle")
+
+    def hatch(self):
+        """Trứng nở thành nhân vật Sơ sinh (stage 1) kèm âm thanh và tim bay lên"""
+        if self.stage != 0:
+            return
+        self.stage = 1
+        self.egg_timer = 0.0
+        self.char_idx = random.randint(0, len(STAGE_CHARACTERS[1]) - 1)
+        self._load_stage_sprite()
+        self.x = 48.0 - STAGE_INFO[1]["size"] // 2
+        self.set_state("cheering")
+        self.spawn_hearts(6)
+        if self.sound:
+            self.sound.play("hatch")
 
     def _check_evolution(self):
         thresholds = [0, 80, 200, 400, 700]
@@ -787,9 +813,13 @@ class Pet:
 
     def draw(self, lcd: pygame.Surface):
         cs = STAGE_INFO[self.stage]["size"]
-        anim = ANIMATIONS.get(self.state, ANIMATIONS["idle"])
-        frames = anim["frames"]
-        cell_num = frames[self.anim_idx % len(frames)]
+        if self.stage == 0:
+            speed = 2.5 if self.egg_timer < 2.5 else 8.0
+            cell_num = 1 if int(self.egg_timer * speed) % 2 == 0 else 2
+        else:
+            anim = ANIMATIONS.get(self.state, ANIMATIONS["idle"])
+            frames = anim["frames"]
+            cell_num = frames[self.anim_idx % len(frames)]
 
         # 0. Vẽ nội thất trong phòng khách (Furniture), vườn cây (Garden), hoặc sân sau (Backyard)
         if self.scene == "home":
@@ -865,10 +895,11 @@ class Pet:
         if not self.is_sleeping:
             self._draw_accessories(lcd, front_layer=False, breath_y=breath_y)
 
+        shake_x = random.choice([-1, 0, 1]) if (self.stage == 0 and self.egg_timer >= 2.5) else 0
         self.spritesheet.draw_with_breath(
             lcd,
             cell_num,
-            int(self.x),
+            int(self.x) + shake_x,
             int(self.y),
             inverted=self.inverted,
             upper_offset_y=breath_y,
@@ -998,7 +1029,7 @@ class Pet:
         if not data:
             return
         self.name = data.get("pet_name", self.name)
-        self.stage = max(1, min(len(STAGE_INFO) - 1, data.get("stage", self.stage)))
+        self.stage = max(0, min(len(STAGE_INFO) - 1, data.get("stage", self.stage)))
         self.generation = data.get("generation", self.generation)
         raw_gender = data.get("gender", self.gender)
         self.gender = {"BOY": "BÉ TRAI", "GIRL": "BÉ GÁI"}.get(raw_gender, raw_gender)
