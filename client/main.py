@@ -1244,13 +1244,20 @@ class TamawebApp:
         if not self.is_authenticated:
             if self.auth_in_progress:
                 self.auth_in_progress_time += dt
-                res = self.backend.check_auth_response()
-                if res is not None:
-                    self._on_auth_complete(res)
-                elif self.auth_in_progress_time > 15.0:
+                try:
+                    res = self.backend.check_auth_response()
+                    if res is not None:
+                        self._on_auth_complete(res)
+                    elif self.auth_in_progress_time > 15.0:
+                        self.auth_in_progress = False
+                        self.sound.play("refuse")
+                        self.auth_msg = "MÁY CHỦ PHẢN HỒI CHẬM, VUI LÒNG THỬ LẠI!"
+                        self.auth_msg_color = COLOR_RED
+                except Exception as e:
+                    print("check_auth_response error:", e)
                     self.auth_in_progress = False
                     self.sound.play("refuse")
-                    self.auth_msg = "MÁY CHỦ PHẢN HỒI CHẬM, VUI LÒNG THỬ LẠI!"
+                    self.auth_msg = "LỖI PHẢN HỒI XÁC THỰC!"
                     self.auth_msg_color = COLOR_RED
             return
 
@@ -1988,79 +1995,86 @@ class TamawebApp:
         self.backend.start_auth_request(self.auth_mode, uname, pwd)
 
     def _on_auth_complete(self, res: dict):
-        self.auth_in_progress = False
-        ok = res.get("ok", False)
-        status = res.get("status", 0)
-        data = res.get("data") or {}
+        try:
+            self.auth_in_progress = False
+            ok = res.get("ok", False)
+            status = res.get("status", 0)
+            data = res.get("data") or {}
 
-        if ok:
-            user = data.get("user") or {}
-            self.backend.user_id = user.get("username", self.auth_pending_user)
-            self.backend.role = user.get("role", "user")
-            self.backend.db_engine = user.get("database", "PostgreSQL")
+            if ok:
+                user = data.get("user") or {}
+                self.backend.user_id = user.get("username", self.auth_pending_user)
+                self.backend.role = user.get("role", "user")
+                self.backend.db_engine = user.get("database", "PostgreSQL")
 
-            # Lưu tài khoản vào cache localStorage
-            self.backend.cache_user(self.backend.user_id, self.auth_pending_pwd)
+                # Lưu tài khoản vào cache localStorage
+                self.backend.cache_user(self.backend.user_id, self.auth_pending_pwd)
 
-            # Khởi tạo hoặc tải Pet
-            self.pet = Pet(self.sound)
-            pet_data = data.get("pet_data")
-            if not pet_data:
-                pet_data = self.backend.load_pet()
+                # Khởi tạo hoặc tải Pet
+                self.pet = Pet(self.sound)
+                pet_data = data.get("pet_data")
+                if not pet_data:
+                    pet_data = self.backend.load_pet()
 
-            if pet_data:
-                self.pet.load_from_dict(pet_data)
-            else:
-                self.pet.name = self.backend.user_id.upper()[:10]
-                self.backend.save_pet(self.pet.to_dict())
-
-            self.sound.play("cheer_success")
-            self.is_authenticated = True
-            self.menu_state = "welcome_back"
-            self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
-            self.auth_msg = ""
-        else:
-            raw_err = data.get("detail") or data.get("message") or ""
-            if isinstance(raw_err, list):
-                try:
-                    err_str = str(raw_err[0].get("msg", raw_err[0]))
-                except Exception:
-                    err_str = str(raw_err)
-            else:
-                err_str = str(raw_err)
-
-            if status == 0:
-                cached_pwd = self.backend.get_cached_user(self.auth_pending_user)
-                if self.auth_pending_mode == "login" and cached_pwd and cached_pwd == self.auth_pending_pwd:
-                    self.backend.user_id = self.auth_pending_user
-                    self.pet = Pet(self.sound)
-                    saved = self.backend.load_pet()
-                    if saved:
-                        self.pet.load_from_dict(saved)
-                    else:
-                        self.pet.name = self.auth_pending_user.upper()[:10]
-                    self.sound.play("cheer_success")
-                    self.is_authenticated = True
-                    self.menu_state = "welcome_back"
-                    self.show_toast(f"ĐĂNG NHẬP: {self.backend.user_id.upper()}!")
-                    return
-                elif self.auth_pending_mode == "register" and not cached_pwd:
-                    self.backend.user_id = self.auth_pending_user
-                    self.backend.cache_user(self.auth_pending_user, self.auth_pending_pwd)
-                    self.pet = Pet(self.sound)
-                    self.pet.name = self.auth_pending_user.upper()[:10]
+                if pet_data:
+                    self.pet.load_from_dict(pet_data)
+                else:
+                    self.pet.name = self.backend.user_id.upper()[:10]
                     self.backend.save_pet(self.pet.to_dict())
-                    self.sound.play("cheer_success")
-                    self.is_authenticated = True
-                    self.menu_state = "welcome_back"
-                    return
-                err_str = "KHÔNG THỂ KẾT NỐI MÁY CHỦ!"
 
-            if not err_str:
-                err_str = "TÀI KHOẢN ĐÃ TỒN TẠI!" if self.auth_pending_mode == "register" else "SAI TÀI KHOẢN / MẬT KHẨU!"
+                self.sound.play("cheer_success")
+                self.is_authenticated = True
+                self.menu_state = "welcome_back"
+                self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
+                self.auth_msg = ""
+            else:
+                raw_err = data.get("detail") or data.get("message") or ""
+                if isinstance(raw_err, list):
+                    try:
+                        err_str = str(raw_err[0].get("msg", raw_err[0]))
+                    except Exception:
+                        err_str = str(raw_err)
+                else:
+                    err_str = str(raw_err)
 
+                if status == 0:
+                    cached_pwd = self.backend.get_cached_user(self.auth_pending_user)
+                    if self.auth_pending_mode == "login" and cached_pwd and cached_pwd == self.auth_pending_pwd:
+                        self.backend.user_id = self.auth_pending_user
+                        self.pet = Pet(self.sound)
+                        saved = self.backend.load_pet()
+                        if saved:
+                            self.pet.load_from_dict(saved)
+                        else:
+                            self.pet.name = self.auth_pending_user.upper()[:10]
+                        self.sound.play("cheer_success")
+                        self.is_authenticated = True
+                        self.menu_state = "welcome_back"
+                        self.show_toast(f"ĐĂNG NHẬP: {self.backend.user_id.upper()}!")
+                        return
+                    elif self.auth_pending_mode == "register" and not cached_pwd:
+                        self.backend.user_id = self.auth_pending_user
+                        self.backend.cache_user(self.auth_pending_user, self.auth_pending_pwd)
+                        self.pet = Pet(self.sound)
+                        self.pet.name = self.auth_pending_user.upper()[:10]
+                        self.backend.save_pet(self.pet.to_dict())
+                        self.sound.play("cheer_success")
+                        self.is_authenticated = True
+                        self.menu_state = "welcome_back"
+                        return
+                    err_str = "KHÔNG THỂ KẾT NỐI MÁY CHỦ!"
+
+                if not err_str:
+                    err_str = "TÀI KHOẢN ĐÃ TỒN TẠI!" if self.auth_pending_mode == "register" else "SAI TÀI KHOẢN / MẬT KHẨU!"
+
+                self.sound.play("refuse")
+                self.auth_msg = err_str.upper()[:40]
+                self.auth_msg_color = COLOR_RED
+        except Exception as e:
+            print("_on_auth_complete error:", e)
+            self.auth_in_progress = False
             self.sound.play("refuse")
-            self.auth_msg = err_str.upper()[:40]
+            self.auth_msg = "LỖI XỬ LÝ ĐĂNG NHẬP!"
             self.auth_msg_color = COLOR_RED
 
     def _logout_account(self):
@@ -2220,7 +2234,7 @@ class TamawebApp:
         sub_surf = self.font_md.render(sub_label, False, (255, 255, 255))
         self.screen.blit(sub_surf, (btn_submit.centerx - sub_surf.get_width() // 2, btn_submit.centery - sub_surf.get_height() // 2))
         if not self.auth_in_progress:
-            self.auth_click_areas.append((btn_submit, self._submit_auth))
+            self.auth_click_areas.append((btn_submit.inflate(14, 14), self._submit_auth))
 
         # Dòng chuyển đổi nhanh bên dưới
         sw_rect = pygame.Rect(card.x + 18, btn_submit.bottom + 10, card.width - 36, 24)
@@ -2232,7 +2246,7 @@ class TamawebApp:
         sw_surf = self.font_xs.render(sw_txt, False, COLOR_PURPLE_BACK)
         self.screen.blit(sw_surf, (sw_rect.centerx - sw_surf.get_width() // 2, sw_rect.centery - sw_surf.get_height() // 2))
         next_mode = "login" if self.auth_mode == "register" else "register"
-        self.auth_click_areas.append((sw_rect, lambda m=next_mode: self._switch_auth_mode(m)))
+        self.auth_click_areas.append((sw_rect.inflate(10, 10), lambda m=next_mode: self._switch_auth_mode(m)))
 
     def _draw_auth_input_box(self, rect: pygame.Rect, text: str, placeholder: str, focused: bool, is_empty: bool):
         pygame.draw.rect(self.screen, (255, 255, 255), rect, border_radius=8)

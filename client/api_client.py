@@ -111,9 +111,49 @@ class APIClient:
                 body_json = json.dumps(payload, ensure_ascii=False)
                 js = f"""
                 (function() {{
-                    if (window.__tamaweb_api && window.__tamaweb_api.request) {{
-                        window.__tamaweb_api.request({json.dumps(req_id)}, 'POST', {json.dumps(path)}, {json.dumps(body_json)});
+                    if (!window.__tamaweb_api) {{
+                        window.__tamaweb_api = {{
+                            result: null,
+                            in_flight: false,
+                            leaderboard: [],
+                            request: function(reqId, method, path, bodyJson) {{
+                                window.__tamaweb_api.in_flight = true;
+                                window.__tamaweb_api.result = null;
+                                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                                var opts = {{
+                                    method: method,
+                                    headers: {{'Content-Type': 'application/json'}}
+                                }};
+                                if (bodyJson) {{
+                                    opts.body = (typeof bodyJson === 'string') ? bodyJson : JSON.stringify(bodyJson);
+                                }}
+                                fetch(base + path, opts)
+                                    .then(function(resp) {{
+                                        return resp.text().then(function(text) {{
+                                            var data = {{}};
+                                            try {{ data = JSON.parse(text); }} catch(e) {{ data = {{detail: text}}; }}
+                                            window.__tamaweb_api.result = {{
+                                                id: reqId,
+                                                status: resp.status,
+                                                ok: resp.ok,
+                                                data: data
+                                            }};
+                                            window.__tamaweb_api.in_flight = false;
+                                        }});
+                                    }})
+                                    .catch(function(err) {{
+                                        window.__tamaweb_api.result = {{
+                                            id: reqId,
+                                            status: 0,
+                                            ok: false,
+                                            data: {{detail: 'Không thể kết nối tới máy chủ!'}}
+                                        }};
+                                        window.__tamaweb_api.in_flight = false;
+                                    }});
+                            }}
+                        }};
                     }}
+                    window.__tamaweb_api.request({json.dumps(req_id)}, 'POST', {json.dumps(path)}, {json.dumps(body_json)});
                 }})();
                 """
                 platform.window.eval(js)
