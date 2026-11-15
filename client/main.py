@@ -4,7 +4,7 @@ import math
 import random
 import pygame
 
-from api_client import APIClient
+from api_client import IS_WEB, APIClient
 from audio import SoundManager
 from definitions import (
     ACCESSORIES,
