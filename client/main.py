@@ -213,7 +213,7 @@ class TamawebApp:
         self.clock = pygame.time.Clock()
 
         self.lcd_native = pygame.Surface((LCD_NATIVE, LCD_NATIVE), pygame.SRCALPHA)
-        self.lcd_display = pygame.Surface((LCD_DISPLAY, LCD_DISPLAY))
+        self.lcd_display = pygame.Surface((LCD_DISPLAY, LCD_DISPLAY), pygame.SRCALPHA)
 
         self.sound = SoundManager()
         self.backend = APIClient("http://127.0.0.1:8000")
