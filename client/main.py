@@ -219,10 +219,11 @@ class TamawebApp:
         self.backend = APIClient("http://127.0.0.1:8000")
         self.pet = Pet(self.sound)
 
-        # Tự động nạp save gần nhất nếu có
-        saved_data = self.backend.load_pet()
-        if saved_data:
-            self.pet.load_from_dict(saved_data)
+        # Tự động nạp save gần nhất nếu có (trên desktop)
+        if not IS_WEB:
+            saved_data = self.backend.load_pet()
+            if saved_data:
+                self.pet.load_from_dict(saved_data)
 
         # Font chữ PixelColeco chuẩn từ Tamaweb
         self.font_xs = get_pixel_font(10)
@@ -352,6 +353,13 @@ class TamawebApp:
         self.auth_click_areas = []
         self.window_click_areas = []
         self.auth_anim_tick = 0.0
+
+        # Trạng thái xác thực bất đồng bộ (tránh tuyệt đối đơ/đứng trang)
+        self.auth_in_progress = False
+        self.auth_in_progress_time = 0.0
+        self.auth_pending_mode = "login"
+        self.auth_pending_user = ""
+        self.auth_pending_pwd = ""
 
         # Các nhân vật Mascot Tamaweb trang trí trên màn hình Đăng nhập / Đăng ký
         self.auth_mascots = [
@@ -1234,6 +1242,16 @@ class TamawebApp:
 
         self.auth_anim_tick += dt
         if not self.is_authenticated:
+            if self.auth_in_progress:
+                self.auth_in_progress_time += dt
+                res = self.backend.check_auth_response()
+                if res is not None:
+                    self._on_auth_complete(res)
+                elif self.auth_in_progress_time > 15.0:
+                    self.auth_in_progress = False
+                    self.sound.play("refuse")
+                    self.auth_msg = "MÁY CHỦ PHẢN HỒI CHẬM, VUI LÒNG THỬ LẠI!"
+                    self.auth_msg_color = COLOR_RED
             return
 
         # Auto-save mỗi 15 giây giống AUTO_SAVE_INTERVAL_SECS trong App.js
@@ -1930,12 +1948,16 @@ class TamawebApp:
     # MÀN HÌNH ĐĂNG NHẬP & ĐĂNG KÝ DỰA TRÊN ĐỒ HỌA PIXEL TAMAWEB
     # =========================================================================
     def _switch_auth_mode(self, mode: str):
+        if self.auth_in_progress:
+            return
         self.sound.play("click")
         self.auth_mode = mode
         self.auth_focus = 0
         self.auth_msg = ""
 
     def _submit_auth(self):
+        if self.auth_in_progress:
+            return
         uname = self.auth_username.strip().lower()
         pwd = self.auth_password.strip()
         if len(uname) < 3:
@@ -1955,37 +1977,91 @@ class TamawebApp:
                 self.auth_msg = "MẬT KHẨU NHẬP LẠI KHÔNG KHỚP!"
                 self.auth_msg_color = COLOR_RED
                 return
-            ok, msg = self.backend.register(uname, pwd)
-            if not ok:
-                self.sound.play("refuse")
-                self.auth_msg = msg.upper()
-                self.auth_msg_color = COLOR_RED
-                return
-            # Khởi tạo Pet mới cho tài khoản vừa đăng ký và lưu ngay vào PostgreSQL
+
+        self.sound.play("click")
+        self.auth_in_progress = True
+        self.auth_in_progress_time = 0.0
+        self.auth_msg = ""
+        self.auth_pending_mode = self.auth_mode
+        self.auth_pending_user = uname
+        self.auth_pending_pwd = pwd
+        self.backend.start_auth_request(self.auth_mode, uname, pwd)
+
+    def _on_auth_complete(self, res: dict):
+        self.auth_in_progress = False
+        ok = res.get("ok", False)
+        status = res.get("status", 0)
+        data = res.get("data") or {}
+
+        if ok:
+            user = data.get("user") or {}
+            self.backend.user_id = user.get("username", self.auth_pending_user)
+            self.backend.role = user.get("role", "user")
+            self.backend.db_engine = user.get("database", "PostgreSQL")
+
+            # Lưu tài khoản vào cache localStorage
+            self.backend.cache_user(self.backend.user_id, self.auth_pending_pwd)
+
+            # Khởi tạo hoặc tải Pet
             self.pet = Pet(self.sound)
-            self.pet.name = uname.upper()[:10]
-            self.backend.save_pet(self.pet.to_dict())
-            self.sound.play("cheer_success")
-            self.is_authenticated = True
-            self.menu_state = "welcome_back"
-        else:
-            ok, msg = self.backend.login(uname, pwd)
-            if not ok:
-                self.sound.play("refuse")
-                self.auth_msg = msg.upper()
-                self.auth_msg_color = COLOR_RED
-                return
-            # Tải dữ liệu Pet của tài khoản từ PostgreSQL
-            self.pet = Pet(self.sound)
-            saved_data = self.backend.load_pet()
-            if saved_data:
-                self.pet.load_from_dict(saved_data)
+            pet_data = data.get("pet_data")
+            if not pet_data:
+                pet_data = self.backend.load_pet()
+
+            if pet_data:
+                self.pet.load_from_dict(pet_data)
             else:
-                self.pet.name = uname.upper()[:10]
+                self.pet.name = self.backend.user_id.upper()[:10]
                 self.backend.save_pet(self.pet.to_dict())
+
             self.sound.play("cheer_success")
             self.is_authenticated = True
             self.menu_state = "welcome_back"
+            self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
+            self.auth_msg = ""
+        else:
+            raw_err = data.get("detail") or data.get("message") or ""
+            if isinstance(raw_err, list):
+                try:
+                    err_str = str(raw_err[0].get("msg", raw_err[0]))
+                except Exception:
+                    err_str = str(raw_err)
+            else:
+                err_str = str(raw_err)
+
+            if status == 0:
+                cached_pwd = self.backend.get_cached_user(self.auth_pending_user)
+                if self.auth_pending_mode == "login" and cached_pwd and cached_pwd == self.auth_pending_pwd:
+                    self.backend.user_id = self.auth_pending_user
+                    self.pet = Pet(self.sound)
+                    saved = self.backend.load_pet()
+                    if saved:
+                        self.pet.load_from_dict(saved)
+                    else:
+                        self.pet.name = self.auth_pending_user.upper()[:10]
+                    self.sound.play("cheer_success")
+                    self.is_authenticated = True
+                    self.menu_state = "welcome_back"
+                    self.show_toast(f"ĐĂNG NHẬP: {self.backend.user_id.upper()}!")
+                    return
+                elif self.auth_pending_mode == "register" and not cached_pwd:
+                    self.backend.user_id = self.auth_pending_user
+                    self.backend.cache_user(self.auth_pending_user, self.auth_pending_pwd)
+                    self.pet = Pet(self.sound)
+                    self.pet.name = self.auth_pending_user.upper()[:10]
+                    self.backend.save_pet(self.pet.to_dict())
+                    self.sound.play("cheer_success")
+                    self.is_authenticated = True
+                    self.menu_state = "welcome_back"
+                    return
+                err_str = "KHÔNG THỂ KẾT NỐI MÁY CHỦ!"
+
+            if not err_str:
+                err_str = "TÀI KHOẢN ĐÃ TỒN TẠI!" if self.auth_pending_mode == "register" else "SAI TÀI KHOẢN / MẬT KHẨU!"
+
+            self.sound.play("refuse")
+            self.auth_msg = err_str.upper()[:40]
+            self.auth_msg_color = COLOR_RED
 
     def _logout_account(self):
         self.sound.play("click")
@@ -1996,6 +2072,7 @@ class TamawebApp:
         self.auth_confirm = ""
         self.auth_focus = 0
         self.auth_msg = ""
+        self.auth_in_progress = False
 
     def _draw_auth_screen(self):
         self.auth_click_areas.clear()
@@ -2127,15 +2204,23 @@ class TamawebApp:
 
         # Nút Hành động chính
         btn_submit = pygame.Rect(card.x + 18, next_y, card.width - 36, 44)
-        sub_col = COLOR_GREEN if self.auth_mode == "register" else COLOR_TEXT_ORANGE
-        sub_shadow = (45, 145, 30) if self.auth_mode == "register" else (190, 85, 0)
+        if self.auth_in_progress:
+            dots = "." * ((int(self.auth_anim_tick * 3) % 3) + 1)
+            sub_col = (180, 150, 130)
+            sub_shadow = (140, 115, 95)
+            sub_label = f"ĐANG XÁC THỰC{dots}"
+        else:
+            sub_col = COLOR_GREEN if self.auth_mode == "register" else COLOR_TEXT_ORANGE
+            sub_shadow = (45, 145, 30) if self.auth_mode == "register" else (190, 85, 0)
+            sub_label = "ĐĂNG KÝ & VÀO GAME" if self.auth_mode == "register" else "ĐĂNG NHẬP VÀO GAME"
+
         pygame.draw.rect(self.screen, sub_shadow, btn_submit.move(0, 4), border_radius=12)
         pygame.draw.rect(self.screen, sub_col, btn_submit, border_radius=12)
         pygame.draw.rect(self.screen, (255, 255, 255), btn_submit, 2, border_radius=12)
-        sub_label = "ĐĂNG KÝ & VÀO GAME" if self.auth_mode == "register" else "ĐĂNG NHẬP VÀO GAME"
         sub_surf = self.font_md.render(sub_label, False, (255, 255, 255))
         self.screen.blit(sub_surf, (btn_submit.centerx - sub_surf.get_width() // 2, btn_submit.centery - sub_surf.get_height() // 2))
-        self.auth_click_areas.append((btn_submit, self._submit_auth))
+        if not self.auth_in_progress:
+            self.auth_click_areas.append((btn_submit, self._submit_auth))
 
         # Dòng chuyển đổi nhanh bên dưới
         sw_rect = pygame.Rect(card.x + 18, btn_submit.bottom + 10, card.width - 36, 24)
@@ -2170,6 +2255,8 @@ class TamawebApp:
         self.auth_show_pw = not self.auth_show_pw
 
     def _handle_auth_keydown(self, event: pygame.event.Event):
+        if self.auth_in_progress:
+            return
         max_fields = 3 if self.auth_mode == "register" else 2
         if event.key in (pygame.K_TAB, pygame.K_DOWN):
             self.sound.play("click")
@@ -2210,7 +2297,10 @@ class TamawebApp:
         if not self.is_authenticated:
             for rect, cb in self.auth_click_areas:
                 if rect.collidepoint(pos):
-                    cb()
+                    try:
+                        cb()
+                    except Exception as e:
+                        print("Auth click error:", e)
                     return
             return
 
@@ -2276,12 +2366,18 @@ class TamawebApp:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    self.handle_click(event.pos)
+                    try:
+                        self.handle_click(event.pos)
+                    except Exception as e:
+                        print("Click error:", e)
                 elif event.type == pygame.KEYDOWN:
-                    if not self.is_authenticated:
-                        self._handle_auth_keydown(event)
-                    else:
-                        self.handle_keydown(event.key)
+                    try:
+                        if not self.is_authenticated:
+                            self._handle_auth_keydown(event)
+                        else:
+                            self.handle_keydown(event.key)
+                    except Exception as e:
+                        print("Key error:", e)
 
             self.update(dt)
             self.draw()

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -12,78 +13,187 @@ if not IS_WEB and SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
 
-def _browser_xhr(method: str, path: str, body_dict: dict | None = None) -> tuple[int, dict]:
-    """Gọi REST API của FastAPI trực tiếp từ trình duyệt WebAssembly (Pygbag)"""
-    try:
-        import platform
-        body_json = json.dumps(body_dict, ensure_ascii=False) if body_dict is not None else ""
-        js_code = f"""
-        (function() {{
-            try {{
-                var xhr = new XMLHttpRequest();
-                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
-                xhr.open({json.dumps(method)}, base + {json.dumps(path)}, false);
-                xhr.setRequestHeader("Content-Type", "application/json");
-                xhr.send({json.dumps(body_json) if body_dict is not None else 'null'});
-                return JSON.stringify({{status: xhr.status, text: xhr.responseText || "{{}}"}});
-            }} catch (err) {{
-                return JSON.stringify({{status: 0, text: "{{}}"}});
-            }}
-        }})()
-        """
-        raw_res = platform.window.eval(js_code)
-        parsed = json.loads(str(raw_res))
-        status = int(parsed.get("status", 0))
-        try:
-            data = json.loads(parsed.get("text") or "{}")
-        except Exception:
-            data = {}
-        return status, data
-    except Exception:
-        return 0, {}
-
-
 class APIClient:
     def __init__(self, base_url: str = API_BASE_URL):
         self.base_url = base_url.rstrip("/")
         self.user_id = "player_1"
         self.role = "user"
         self.db_engine = "PostgreSQL"
+        self._desktop_auth_result = None
+        self._init_web_bridge()
+
+    def _init_web_bridge(self):
+        """Khởi tạo cầu nối JavaScript không chặn (asynchronous non-blocking) cho trình duyệt"""
+        if not IS_WEB:
+            return
+        try:
+            import platform
+            js_init = """
+            (function() {
+                if (!window.__tamaweb_api) {
+                    window.__tamaweb_api = {
+                        result: null,
+                        in_flight: false,
+                        leaderboard: [],
+                        request: function(reqId, method, path, bodyJson) {
+                            window.__tamaweb_api.in_flight = true;
+                            window.__tamaweb_api.result = null;
+                            var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                            var opts = {
+                                method: method,
+                                headers: {'Content-Type': 'application/json'}
+                            };
+                            if (bodyJson) {
+                                opts.body = (typeof bodyJson === 'string') ? bodyJson : JSON.stringify(bodyJson);
+                            }
+                            fetch(base + path, opts)
+                                .then(function(resp) {
+                                    return resp.text().then(function(text) {
+                                        var data = {};
+                                        try { data = JSON.parse(text); } catch(e) { data = {detail: text}; }
+                                        window.__tamaweb_api.result = {
+                                            id: reqId,
+                                            status: resp.status,
+                                            ok: resp.ok,
+                                            data: data
+                                        };
+                                        window.__tamaweb_api.in_flight = false;
+                                    });
+                                })
+                                .catch(function(err) {
+                                    window.__tamaweb_api.result = {
+                                        id: reqId,
+                                        status: 0,
+                                        ok: false,
+                                        data: {detail: 'Không thể kết nối tới máy chủ!'}
+                                    };
+                                    window.__tamaweb_api.in_flight = false;
+                                });
+                        },
+                        fetchLeaderboard: function() {
+                            var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                            fetch(base + '/api/leaderboard?limit=10')
+                                .then(function(r) { return r.json(); })
+                                .then(function(d) {
+                                    if (d && d.leaderboard) {
+                                        window.__tamaweb_api.leaderboard = d.leaderboard;
+                                    }
+                                })
+                                .catch(function() {});
+                        }
+                    };
+                    window.__tamaweb_api.fetchLeaderboard();
+                }
+            })();
+            """
+            platform.window.eval(js_init)
+        except Exception as e:
+            print("Init web bridge warning:", e)
 
     def _local_save_path(self) -> str:
         safe_uid = "".join(c for c in self.user_id if c.isalnum() or c in ("_", "-")) or "player_1"
         return os.path.join(CLIENT_DIR, f"local_save_{safe_uid}.json")
 
-    def register(self, username: str, password: str) -> tuple[bool, str]:
-        """Đăng ký tài khoản mới và lưu vào PostgreSQL (`tamaweb_db`)"""
+    # =========================================================================
+    # XÁC THỰC BẤT ĐỒNG BỘ (KHÔNG BAO GIỜ GÂY ĐƠ TRÌNH DUYỆT)
+    # =========================================================================
+    def start_auth_request(self, mode: str, username: str, password: str) -> str:
+        """Gửi yêu cầu đăng ký/đăng nhập bất đồng bộ qua fetch native của trình duyệt"""
         uname = username.strip().lower()
         pwd = password.strip()
+        req_id = f"auth_{int(time.time() * 1000)}"
+        path = "/api/auth/register" if mode == "register" else "/api/auth/login"
+        payload = {"username": uname, "password": pwd}
 
         if IS_WEB:
-            status, res = _browser_xhr("POST", "/api/auth/register", {"username": uname, "password": pwd})
-            if status == 200:
-                user = res.get("user") or {}
-                self.user_id = user.get("username", uname)
-                self.role = user.get("role", "user")
-                self.db_engine = user.get("database", "PostgreSQL")
-                return True, res.get("message", "ĐĂNG KÝ THÀNH CÔNG!")
-            elif status > 0:
-                return False, res.get("detail", "TÀI KHOẢN ĐÃ TỒN TẠI!")
-            # Fallback localStorage nếu mở tĩnh
             try:
                 import platform
-                raw_users = platform.window.localStorage.getItem("tamaweb_users") or "{}"
-                users = json.loads(raw_users)
-                if uname in users:
-                    return False, "TÀI KHOẢN ĐÃ TỒN TẠI!"
-                users[uname] = pwd
-                platform.window.localStorage.setItem("tamaweb_users", json.dumps(users))
-                self.user_id = uname
-                return True, "ĐĂNG KÝ THÀNH CÔNG!"
-            except Exception:
-                self.user_id = uname
-                return True, "ĐĂNG KÝ THÀNH CÔNG!"
+                body_json = json.dumps(payload, ensure_ascii=False)
+                js = f"""
+                (function() {{
+                    if (window.__tamaweb_api && window.__tamaweb_api.request) {{
+                        window.__tamaweb_api.request({json.dumps(req_id)}, 'POST', {json.dumps(path)}, {json.dumps(body_json)});
+                    }}
+                }})();
+                """
+                platform.window.eval(js)
+            except Exception as e:
+                print("start_auth_request error:", e)
+        else:
+            # Trên Desktop thực hiện qua urllib đồng bộ
+            if mode == "register":
+                ok, msg = self.register(uname, pwd)
+            else:
+                ok, msg = self.login(uname, pwd)
+            self._desktop_auth_result = {
+                "id": req_id,
+                "ok": ok,
+                "status": 200 if ok else 400,
+                "data": {
+                    "user": {"username": self.user_id, "role": self.role, "database": self.db_engine},
+                    "message": msg,
+                    "detail": msg,
+                    "pet_data": self.load_pet() if ok else None,
+                },
+            }
+        return req_id
 
+    def check_auth_response(self) -> dict | None:
+        """Kiểm tra xem yêu cầu xác thực đã có kết quả trả về từ server chưa"""
+        if IS_WEB:
+            try:
+                import platform
+                raw = platform.window.eval("""
+                (function() {
+                    if (!window.__tamaweb_api || !window.__tamaweb_api.result) return "";
+                    var r = window.__tamaweb_api.result;
+                    window.__tamaweb_api.result = null;
+                    return JSON.stringify(r);
+                })()
+                """)
+                if raw:
+                    return json.loads(str(raw))
+            except Exception as e:
+                print("check_auth_response error:", e)
+            return None
+        else:
+            res = self._desktop_auth_result
+            self._desktop_auth_result = None
+            return res
+
+    def get_cached_user(self, username: str) -> str | None:
+        """Đọc mật khẩu đã lưu trong localStorage"""
+        uname = username.strip().lower()
+        if IS_WEB:
+            try:
+                import platform
+                raw = platform.window.localStorage.getItem("tamaweb_users")
+                if raw:
+                    users = json.loads(str(raw))
+                    return users.get(uname)
+            except Exception:
+                pass
+        return None
+
+    def cache_user(self, username: str, password: str):
+        """Lưu thông tin đăng nhập vào localStorage để đăng nhập mượt mà"""
+        uname = username.strip().lower()
+        if IS_WEB:
+            try:
+                import platform
+                raw = platform.window.localStorage.getItem("tamaweb_users") or "{}"
+                users = json.loads(str(raw))
+                users[uname] = password
+                platform.window.localStorage.setItem("tamaweb_users", json.dumps(users, ensure_ascii=False))
+            except Exception:
+                pass
+
+    # =========================================================================
+    # CÁC HÀM XÁC THỰC ĐỒNG BỘ DỰ PHÒNG (DÙNG CHO DESKTOP)
+    # =========================================================================
+    def register(self, username: str, password: str) -> tuple[bool, str]:
+        uname = username.strip().lower()
+        pwd = password.strip()
         try:
             url = f"{self.base_url}/api/auth/register"
             data = json.dumps({"username": uname, "password": pwd}).encode("utf-8")
@@ -93,7 +203,7 @@ class APIClient:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 user = res.get("user") or {}
                 self.user_id = user.get("username", uname)
@@ -103,7 +213,8 @@ class APIClient:
         except urllib.error.HTTPError as e:
             try:
                 err_data = json.loads(e.read().decode("utf-8"))
-                return False, err_data.get("detail", "ĐĂNG KÝ THẤT BẠI!")
+                detail = err_data.get("detail", "ĐĂNG KÝ THẤT BẠI!")
+                return False, detail if isinstance(detail, str) else str(detail)
             except Exception:
                 return False, "TÀI KHOẢN ĐÃ TỒN TẠI!"
         except Exception:
@@ -120,31 +231,8 @@ class APIClient:
                 return False, f"LỖI KẾT NỐI DB: {ex}"
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
-        """Đăng nhập tài khoản từ PostgreSQL (`tamaweb_db`)"""
         uname = username.strip().lower()
         pwd = password.strip()
-
-        if IS_WEB:
-            status, res = _browser_xhr("POST", "/api/auth/login", {"username": uname, "password": pwd})
-            if status == 200:
-                user = res.get("user") or {}
-                self.user_id = user.get("username", uname)
-                self.role = user.get("role", "user")
-                self.db_engine = user.get("database", "PostgreSQL")
-                return True, res.get("message", "ĐĂNG NHẬP THÀNH CÔNG!")
-            elif status > 0:
-                return False, res.get("detail", "SAI TÀI KHOẢN / MẬT KHẨU!")
-            try:
-                import platform
-                raw_users = platform.window.localStorage.getItem("tamaweb_users") or "{}"
-                users = json.loads(raw_users)
-                if users.get(uname) == pwd or (uname == "admin" and pwd == "admin123"):
-                    self.user_id = uname
-                    return True, "ĐĂNG NHẬP THÀNH CÔNG!"
-                return False, "SAI TÀI KHOẢN / MẬT KHẨU!"
-            except Exception:
-                return False, "SAI TÀI KHOẢN / MẬT KHẨU!"
-
         try:
             url = f"{self.base_url}/api/auth/login"
             data = json.dumps({"username": uname, "password": pwd}).encode("utf-8")
@@ -154,7 +242,7 @@ class APIClient:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 user = res.get("user") or {}
                 self.user_id = user.get("username", uname)
@@ -164,7 +252,8 @@ class APIClient:
         except urllib.error.HTTPError as e:
             try:
                 err_data = json.loads(e.read().decode("utf-8"))
-                return False, err_data.get("detail", "SAI TÀI KHOẢN / MẬT KHẨU!")
+                detail = err_data.get("detail", "SAI TÀI KHOẢN / MẬT KHẨU!")
+                return False, detail if isinstance(detail, str) else str(detail)
             except Exception:
                 return False, "SAI TÀI KHOẢN / MẬT KHẨU!"
         except Exception:
@@ -180,22 +269,42 @@ class APIClient:
             except Exception as ex:
                 return False, f"LỖI KẾT NỐI DB: {ex}"
 
+    # =========================================================================
+    # LƯU VÀ TẢI THÚ CƯNG (TỨC THÌ LOCALSTORAGE + ĐỒNG BỘ NGẦM LÊN CLOUD)
+    # =========================================================================
     def save_pet(self, pet_dict: dict) -> tuple[bool, str]:
         pet_dict["user_id"] = self.user_id
+
+        if IS_WEB:
+            try:
+                import platform
+                # 1. Lưu ngay vào localStorage (0ms, không lag, không mất)
+                platform.window.localStorage.setItem(
+                    f"tamaweb_pet_{self.user_id}", json.dumps(pet_dict, ensure_ascii=False)
+                )
+                # 2. Đồng bộ ngầm lên PostgreSQL qua fetch (non-blocking)
+                body_json = json.dumps(pet_dict, ensure_ascii=False)
+                js = f"""
+                (function() {{
+                    var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                    fetch(base + '/api/pet/save', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: {json.dumps(body_json)}
+                    }}).catch(function(){{}});
+                }})();
+                """
+                platform.window.eval(js)
+            except Exception as e:
+                print("save_pet web error:", e)
+            return True, "Đã lưu!"
+
+        # Trên Desktop
         try:
             with open(self._local_save_path(), "w", encoding="utf-8") as f:
                 json.dump(pet_dict, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-
-        if IS_WEB:
-            status, _ = _browser_xhr("POST", "/api/pet/save", pet_dict)
-            try:
-                import platform
-                platform.window.localStorage.setItem(f"tamaweb_pet_{self.user_id}", json.dumps(pet_dict))
-            except Exception:
-                pass
-            return (status == 200), "Đã lưu!"
 
         try:
             url = f"{self.base_url}/api/pet/save"
@@ -220,18 +329,16 @@ class APIClient:
 
     def load_pet(self) -> dict | None:
         if IS_WEB:
-            status, res = _browser_xhr("GET", f"/api/pet/load/{self.user_id}")
-            if status == 200 and res.get("status") == "success" and res.get("data"):
-                return res["data"]
             try:
                 import platform
                 raw = platform.window.localStorage.getItem(f"tamaweb_pet_{self.user_id}")
                 if raw:
-                    return json.loads(raw)
+                    return json.loads(str(raw))
             except Exception:
                 pass
             return None
 
+        # Trên Desktop
         try:
             url = f"{self.base_url}/api/pet/load/{self.user_id}"
             req = urllib.request.Request(url)
@@ -258,11 +365,30 @@ class APIClient:
                 pass
         return None
 
+    # =========================================================================
+    # BẢNG XẾP HẠNG & ANALYTICS
+    # =========================================================================
     def get_leaderboard(self) -> list:
         if IS_WEB:
-            status, res = _browser_xhr("GET", "/api/leaderboard?limit=10")
-            if status == 200:
-                return res.get("leaderboard", [])
+            try:
+                import platform
+                raw = platform.window.eval("""
+                (function() {
+                    if (window.__tamaweb_api) {
+                        if (window.__tamaweb_api.fetchLeaderboard) {
+                            window.__tamaweb_api.fetchLeaderboard();
+                        }
+                        if (window.__tamaweb_api.leaderboard && window.__tamaweb_api.leaderboard.length > 0) {
+                            return JSON.stringify(window.__tamaweb_api.leaderboard);
+                        }
+                    }
+                    return "";
+                })()
+                """)
+                if raw:
+                    return json.loads(str(raw))
+            except Exception:
+                pass
             return []
 
         try:
@@ -286,7 +412,22 @@ class APIClient:
             "payload": payload or {},
         }
         if IS_WEB:
-            _browser_xhr("POST", "/api/analytics/event", body)
+            try:
+                import platform
+                body_json = json.dumps(body, ensure_ascii=False)
+                js = f"""
+                (function() {{
+                    var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                    fetch(base + '/api/analytics/event', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: {json.dumps(body_json)}
+                    }}).catch(function(){{}});
+                }})();
+                """
+                platform.window.eval(js)
+            except Exception:
+                pass
             return
 
         try:
@@ -298,6 +439,6 @@ class APIClient:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=0.8)
+            urllib.request.urlopen(req, timeout=1.0)
         except Exception:
             pass

@@ -87,7 +87,8 @@ def api_login(req: AuthRequest):
     ok, msg, user = login_user(req.username, req.password)
     if not ok:
         raise HTTPException(status_code=401, detail=msg)
-    return {"status": "success", "message": msg, "user": user}
+    pet_data = get_pet_data(req.username.strip().lower())
+    return {"status": "success", "message": msg, "user": user, "pet_data": pet_data}
 
 
 @app.get("/api/users")

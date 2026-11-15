@@ -271,6 +271,60 @@ function show_infobox() {
 
     <script src="https://pygame-web.github.io/cdn/0.9.3//browserfs.min.js"></script>
 
+    <script>
+        window.__tamaweb_api = {
+            result: null,
+            in_flight: false,
+            leaderboard: [],
+            request: function(reqId, method, path, bodyJson) {
+                window.__tamaweb_api.in_flight = true;
+                window.__tamaweb_api.result = null;
+                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                var opts = {
+                    method: method,
+                    headers: {'Content-Type': 'application/json'}
+                };
+                if (bodyJson) {
+                    opts.body = (typeof bodyJson === 'string') ? bodyJson : JSON.stringify(bodyJson);
+                }
+                fetch(base + path, opts)
+                    .then(function(resp) {
+                        return resp.text().then(function(text) {
+                            var data = {};
+                            try { data = JSON.parse(text); } catch(e) { data = {detail: text}; }
+                            window.__tamaweb_api.result = {
+                                id: reqId,
+                                status: resp.status,
+                                ok: resp.ok,
+                                data: data
+                            };
+                            window.__tamaweb_api.in_flight = false;
+                        });
+                    })
+                    .catch(function(err) {
+                        window.__tamaweb_api.result = {
+                            id: reqId,
+                            status: 0,
+                            ok: false,
+                            data: {detail: 'Không thể kết nối máy chủ!'}
+                        };
+                        window.__tamaweb_api.in_flight = false;
+                    });
+            },
+            fetchLeaderboard: function() {
+                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                fetch(base + '/api/leaderboard?limit=10')
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        if (d && d.leaderboard) {
+                            window.__tamaweb_api.leaderboard = d.leaderboard;
+                        }
+                    })
+                    .catch(function() {});
+            }
+        };
+        try { window.__tamaweb_api.fetchLeaderboard(); } catch(e) {}
+    </script>
 </head>
 
 <body>
