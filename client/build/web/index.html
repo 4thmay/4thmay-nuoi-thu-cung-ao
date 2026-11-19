@@ -282,6 +282,8 @@ function show_infobox() {
             result: null,
             in_flight: false,
             leaderboard: [],
+            adminDashboard: null,
+            adminDashboardUpdated: false,
             request: function(reqId, method, path, bodyJson) {
                 window.__tamaweb_api.in_flight = true;
                 window.__tamaweb_api.result = null;
@@ -298,6 +300,10 @@ function show_infobox() {
                         return resp.text().then(function(text) {
                             var data = {};
                             try { data = JSON.parse(text); } catch(e) { data = {detail: text}; }
+                            if (data && data.dashboard) {
+                                window.__tamaweb_api.adminDashboard = data.dashboard;
+                                window.__tamaweb_api.adminDashboardUpdated = true;
+                            }
                             window.__tamaweb_api.result = {
                                 id: reqId,
                                 status: resp.status,
@@ -327,6 +333,34 @@ function show_infobox() {
                         }
                     })
                     .catch(function() {});
+            },
+            fetchAdminDashboard: function(adminUser) {
+                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                fetch(base + '/api/admin/dashboard?admin_user=' + encodeURIComponent(adminUser || 'admin'))
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        if (d && d.status === 'success') {
+                            window.__tamaweb_api.adminDashboard = d;
+                            window.__tamaweb_api.adminDashboardUpdated = true;
+                        }
+                    })
+                    .catch(function() {});
+            },
+            adminAction: function(path, bodyJson) {
+                var base = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://127.0.0.1:8000';
+                fetch(base + path, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: (typeof bodyJson === 'string') ? bodyJson : JSON.stringify(bodyJson)
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d && d.dashboard) {
+                        window.__tamaweb_api.adminDashboard = d.dashboard;
+                        window.__tamaweb_api.adminDashboardUpdated = true;
+                    }
+                })
+                .catch(function() {});
             }
         };
         try { window.__tamaweb_api.fetchLeaderboard(); } catch(e) {}

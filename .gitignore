@@ -5,4 +5,3 @@ server/tamaweb.db
 client/local_save*.json
 client/build/web-cache/
 client/build/version.txt
-assets/

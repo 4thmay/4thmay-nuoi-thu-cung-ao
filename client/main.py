@@ -370,6 +370,51 @@ class TamawebApp:
         ]
         self.striped_card_hdr = self._create_striped_surface(348, 36, COLOR_STRIPE_A1, COLOR_STRIPE_A2)
 
+        # =====================================================================
+        # TRẠNG THÁI TRANG QUẢN TRỊ VIÊN - QUẢN LÝ TÀI KHOẢN (CHỈ ADMIN)
+        # =====================================================================
+        self.is_admin_mode = False
+        self.admin_dashboard = {}
+        self.admin_stats = {
+            "total_accounts": 0,
+            "active_accounts": 0,
+            "new_today_accounts": 0,
+            "locked_accounts": 0,
+            "online_players": 0,
+            "inactive_accounts": 0,
+        }
+        self.admin_accounts = []
+        self.admin_filter = "all"          # "all", "active", "today", "locked", "online", "inactive"
+        self.admin_search_query = ""
+        self.admin_search_focused = False
+        self.admin_selected_username = ""
+        self.admin_page = 0
+        self.admin_detail_tab = "all_4"    # "all_4", "part1", "part2", "part3", "part4", "locked_list"
+        self.admin_show_user_pw = False
+        self.admin_modal = None            # None, "add", "edit", "lock", "delete"
+        self.admin_modal_focus = 0
+        self.admin_form = {
+            "username": "",
+            "password": "",
+            "status": "active",
+            "level": "1",
+            "total_xp": "0",
+            "gold": "300",
+            "unlocked_count": "1",
+            "streak_days": "1",
+            "last_device": "Web Browser (Tamaweb WASM)",
+            "lock_reason": "Gian lận Coin & XP (Cheat/Hack)",
+            "lock_duration_key": "24h",
+        }
+        self.admin_notice_msg = ""
+        self.admin_notice_color = COLOR_GREEN
+        self.admin_notice_timer = 0.0
+        self.admin_click_areas = []
+        self.admin_modal_click_areas = []
+        self.admin_sprite_cache = {}
+        self.striped_admin_hdr = self._create_striped_surface(1180, 52, COLOR_STRIPE_A1, COLOR_STRIPE_A2)
+        self.striped_admin_sec = self._create_striped_surface(694, 28, COLOR_STRIPE_B1, COLOR_STRIPE_B2)
+
         self.backend.send_analytics("game_start", {"ui": "full_tamaweb_1_to_1"})
 
     def _build_border_foliage(self) -> list[tuple[pygame.Surface, int, int]]:
@@ -1240,6 +1285,11 @@ class TamawebApp:
         if self.toast_timer > 0:
             self.toast_timer = max(0.0, self.toast_timer - dt)
 
+        if self.admin_notice_timer > 0:
+            self.admin_notice_timer = max(0.0, self.admin_notice_timer - dt)
+            if self.admin_notice_timer == 0:
+                self.admin_notice_msg = ""
+
         self.auth_anim_tick += dt
         if not self.is_authenticated:
             if self.auth_in_progress:
@@ -1259,6 +1309,14 @@ class TamawebApp:
                     self.sound.play("refuse")
                     self.auth_msg = "LỖI PHẢN HỒI XÁC THỰC!"
                     self.auth_msg_color = COLOR_RED
+            return
+
+        if self.is_admin_mode:
+            fresh_dash = self.backend.poll_web_admin_dashboard()
+            if fresh_dash:
+                self.admin_dashboard = fresh_dash
+                self.admin_stats = fresh_dash.get("stats") or self.admin_stats
+                self.admin_accounts = fresh_dash.get("accounts") or self.admin_accounts
             return
 
         # Auto-save mỗi 15 giây giống AUTO_SAVE_INTERVAL_SECS trong App.js
@@ -1340,6 +1398,22 @@ class TamawebApp:
             self._draw_auth_screen()
             pygame.display.flip()
             return
+
+        # Nếu là Quản trị viên (admin) đang ở Trang Quản Lý Tài Khoản -> Hiển thị Trang Quản Trị
+        if self.is_admin_mode and self.backend.user_id == "admin" and self.backend.role == "admin":
+            self._draw_admin_screen()
+            pygame.display.flip()
+            return
+
+        # Nếu Admin đang thử nghiệm trong game -> Hiển thị nút quay về Trang Quản Trị ở góc trên
+        if self.backend.user_id == "admin" and self.backend.role == "admin":
+            btn_back_adm = pygame.Rect((WIN_W - 260) // 2, 22, 260, 36)
+            pygame.draw.rect(self.screen, (110, 65, 25), btn_back_adm.move(0, 3), border_radius=10)
+            pygame.draw.rect(self.screen, COLOR_PURPLE_BACK, btn_back_adm, border_radius=10)
+            pygame.draw.rect(self.screen, COLOR_BORDER, btn_back_adm, 2, border_radius=10)
+            adm_lbl = self.font_xs.render("< VỀ TRANG QUẢN LÝ TÀI KHOẢN (ADMIN)", False, (255, 255, 255))
+            self.screen.blit(adm_lbl, (btn_back_adm.centerx - adm_lbl.get_width() // 2, btn_back_adm.centery - adm_lbl.get_height() // 2))
+            self.window_click_areas.append((btn_back_adm, self._enter_admin_dashboard))
 
         # 3. Vỏ trứng Tamagotchi (.dom-shell 320x400 hoặc Classic Front.png)
         if self.use_classic_front:
@@ -1993,6 +2067,10 @@ class TamawebApp:
         self.auth_pending_user = uname
         self.auth_pending_pwd = pwd
         self.backend.start_auth_request(self.auth_mode, uname, pwd)
+        if not IS_WEB:
+            res = self.backend.check_auth_response()
+            if res is not None:
+                self._on_auth_complete(res)
 
     def _on_auth_complete(self, res: dict):
         try:
@@ -2004,8 +2082,10 @@ class TamawebApp:
             if ok:
                 user = data.get("user") or {}
                 self.backend.user_id = user.get("username", self.auth_pending_user)
-                self.backend.role = user.get("role", "user")
+                self.backend.role = "admin" if self.backend.user_id == "admin" else user.get("role", "user")
                 self.backend.db_engine = user.get("database", "PostgreSQL")
+                if data.get("dashboard"):
+                    self.backend.set_cached_dashboard(data["dashboard"])
 
                 # Lưu tài khoản vào cache localStorage
                 self.backend.cache_user(self.backend.user_id, self.auth_pending_pwd)
@@ -2024,13 +2104,20 @@ class TamawebApp:
 
                 self.sound.play("cheer_success")
                 self.is_authenticated = True
+                self.auth_msg = ""
+
+                # Nếu là Quản trị viên (admin) -> Chuyển thẳng sang Trang Quản Lý Tài Khoản
+                if self.backend.user_id == "admin" and self.backend.role == "admin":
+                    self._enter_admin_dashboard()
+                    return
+
+                self.is_admin_mode = False
                 if self.pet.stage == 0:
                     self.menu_state = None
                     self.show_toast("QUẢ TRỨNG SẮP NỞ RỒI!")
                 else:
                     self.menu_state = "welcome_back"
                     self.show_toast(f"XIN CHÀO {self.backend.user_id.upper()}!")
-                self.auth_msg = ""
             else:
                 raw_err = data.get("detail") or data.get("message") or ""
                 if isinstance(raw_err, list):
@@ -2042,9 +2129,18 @@ class TamawebApp:
                     err_str = str(raw_err)
 
                 if status == 0:
+                    if self.auth_pending_mode == "login" and self.auth_pending_user == "admin" and self.auth_pending_pwd == "admin123":
+                        self.backend.user_id = "admin"
+                        self.backend.role = "admin"
+                        self.backend.cache_user("admin", "admin123")
+                        self.sound.play("cheer_success")
+                        self.is_authenticated = True
+                        self._enter_admin_dashboard()
+                        return
                     cached_pwd = self.backend.get_cached_user(self.auth_pending_user)
                     if self.auth_pending_mode == "login" and cached_pwd and cached_pwd == self.auth_pending_pwd:
                         self.backend.user_id = self.auth_pending_user
+                        self.backend.role = "admin" if self.auth_pending_user == "admin" else "user"
                         self.pet = Pet(self.sound)
                         saved = self.backend.load_pet()
                         if saved:
@@ -2053,17 +2149,23 @@ class TamawebApp:
                             self.pet.name = self.auth_pending_user.upper()[:10]
                         self.sound.play("cheer_success")
                         self.is_authenticated = True
-                        self.menu_state = "welcome_back"
-                        self.show_toast(f"ĐĂNG NHẬP: {self.backend.user_id.upper()}!")
+                        if self.backend.user_id == "admin":
+                            self._enter_admin_dashboard()
+                        else:
+                            self.is_admin_mode = False
+                            self.menu_state = "welcome_back"
+                            self.show_toast(f"ĐĂNG NHẬP: {self.backend.user_id.upper()}!")
                         return
                     elif self.auth_pending_mode == "register" and not cached_pwd:
                         self.backend.user_id = self.auth_pending_user
+                        self.backend.role = "user"
                         self.backend.cache_user(self.auth_pending_user, self.auth_pending_pwd)
                         self.pet = Pet(self.sound)
                         self.pet.name = self.auth_pending_user.upper()[:10]
                         self.backend.save_pet(self.pet.to_dict())
                         self.sound.play("cheer_success")
                         self.is_authenticated = True
+                        self.is_admin_mode = False
                         self.menu_state = "welcome_back"
                         return
                     err_str = "KHÔNG THỂ KẾT NỐI MÁY CHỦ!"
@@ -2072,7 +2174,7 @@ class TamawebApp:
                     err_str = "TÀI KHOẢN ĐÃ TỒN TẠI!" if self.auth_pending_mode == "register" else "SAI TÀI KHOẢN / MẬT KHẨU!"
 
                 self.sound.play("refuse")
-                self.auth_msg = err_str.upper()[:40]
+                self.auth_msg = err_str.upper()[:42]
                 self.auth_msg_color = COLOR_RED
         except Exception as e:
             print("_on_auth_complete error:", e)
@@ -2083,14 +2185,1432 @@ class TamawebApp:
 
     def _logout_account(self):
         self.sound.play("click")
-        self.backend.save_pet(self.pet.to_dict())
+        if not self.is_admin_mode:
+            self.backend.save_pet(self.pet.to_dict())
+        self.backend.logout()
         self.close_all_menus()
         self.is_authenticated = False
+        self.is_admin_mode = False
+        self.admin_modal = None
         self.auth_password = ""
         self.auth_confirm = ""
         self.auth_focus = 0
         self.auth_msg = ""
         self.auth_in_progress = False
+
+    # =========================================================================
+    # TRANG QUẢN TRỊ VIÊN - QUẢN LÝ TÀI KHOẢN (DỰA TRÊN ĐỒ HOẠ PIXEL TAMAWEB)
+    # =========================================================================
+    def _enter_admin_dashboard(self):
+        if self.backend.user_id != "admin" or self.backend.role != "admin":
+            self.is_admin_mode = False
+            return
+        self.sound.play("confirm")
+        self.is_admin_mode = True
+        self.admin_modal = None
+        self.admin_search_focused = False
+        self._refresh_admin_dashboard()
+        self._set_admin_notice("CHÀO MỪNG QUẢN TRỊ VIÊN! HỆ THỐNG ĐÃ ĐỒNG BỘ.", COLOR_GREEN)
+
+    def _switch_admin_to_game(self):
+        self.sound.play("confirm")
+        self.is_admin_mode = False
+        self.admin_modal = None
+        self.menu_state = None
+
+    def _set_admin_notice(self, msg: str, color: tuple = COLOR_GREEN):
+        self.admin_notice_msg = msg.upper()
+        self.admin_notice_color = color
+        self.admin_notice_timer = 3.5
+
+    def _refresh_admin_dashboard(self, keep_selection: bool = True):
+        data = self.backend.get_admin_dashboard()
+        self.admin_dashboard = data or {}
+        self.admin_stats = self.admin_dashboard.get("stats") or {
+            "total_accounts": 0,
+            "active_accounts": 0,
+            "new_today_accounts": 0,
+            "locked_accounts": 0,
+            "online_players": 0,
+            "inactive_accounts": 0,
+        }
+        self.admin_accounts = self.admin_dashboard.get("accounts") or []
+        if self.admin_accounts:
+            usernames = [a["username"] for a in self.admin_accounts]
+            if not keep_selection or self.admin_selected_username not in usernames:
+                # Ưu tiên chọn tài khoản người chơi đầu tiên hoặc tài khoản đầu danh sách
+                non_admins = [a["username"] for a in self.admin_accounts if a["username"] != "admin"]
+                self.admin_selected_username = non_admins[0] if non_admins else usernames[0]
+
+    def _get_filtered_admin_accounts(self) -> list[dict]:
+        q = self.admin_search_query.strip().lower()
+        result = []
+        for a in self.admin_accounts:
+            st = a.get("status", "active")
+            if self.admin_filter == "active" and st != "active":
+                continue
+            elif self.admin_filter == "today" and not a.get("is_registered_today"):
+                continue
+            elif self.admin_filter == "locked" and st != "locked":
+                continue
+            elif self.admin_filter == "online" and not a.get("is_online"):
+                continue
+            elif self.admin_filter == "inactive" and st != "inactive":
+                continue
+
+            if q:
+                hay = f"{a.get('id', '')} {a.get('player_code', '')} {a.get('username', '')} {a.get('pet_name', '')}".lower()
+                if q not in hay:
+                    continue
+            result.append(a)
+        return result
+
+    def _get_selected_admin_account(self) -> dict | None:
+        for a in self.admin_accounts:
+            if a["username"] == self.admin_selected_username:
+                return a
+        filtered = self._get_filtered_admin_accounts()
+        if filtered:
+            self.admin_selected_username = filtered[0]["username"]
+            return filtered[0]
+        if self.admin_accounts:
+            self.admin_selected_username = self.admin_accounts[0]["username"]
+            return self.admin_accounts[0]
+        return None
+
+    def _get_admin_char_sprite(self, char_path: str, frame_num: int = 1, size: int = 32) -> pygame.Surface:
+        path = char_path or "resources/img/character/chara_1b.png"
+        key = f"{path}::{frame_num}::{size}"
+        if key in self.admin_sprite_cache:
+            return self.admin_sprite_cache[key]
+        try:
+            raw = load_image(path)
+            cell = max(16, raw.get_width() // 4)
+            sheet = SpriteSheet(path, cell, 4, 4)
+            surf = pygame.transform.scale(sheet.get_frame(frame_num), (size, size))
+        except Exception:
+            surf = pygame.transform.scale(self.auth_mascots[0].get_frame(1), (size, size))
+        self.admin_sprite_cache[key] = surf
+        return surf
+
+    def _draw_clipped_text(
+        self,
+        surf: pygame.Surface,
+        font,
+        text: str,
+        color: tuple,
+        x: int,
+        y: int,
+        max_w: int,
+        align: str = "left",
+    ):
+        s = str(text)
+        if font.size(s)[0] > max_w and max_w > 20:
+            while len(s) > 1 and font.size(s + "..")[0] > max_w:
+                s = s[:-1]
+            s = s + ".."
+        t_surf = font.render(s, False, color)
+        if align == "center":
+            dx = x - t_surf.get_width() // 2
+        elif align == "right":
+            dx = x - t_surf.get_width()
+        else:
+            dx = x
+        surf.blit(t_surf, (dx, y))
+
+    def _draw_3d_button(
+        self,
+        rect: pygame.Rect,
+        label: str,
+        bg_col: tuple,
+        fg_col: tuple = (255, 255, 255),
+        border_col: tuple = COLOR_BORDER,
+        shadow_col: tuple = (140, 80, 30),
+        font=None,
+        radius: int = 8,
+    ):
+        use_font = font or self.font_xs
+        pygame.draw.rect(self.screen, shadow_col, rect.move(0, 3), border_radius=radius)
+        pygame.draw.rect(self.screen, bg_col, rect, border_radius=radius)
+        pygame.draw.rect(self.screen, border_col, rect, 2, border_radius=radius)
+        self._draw_clipped_text(
+            self.screen,
+            use_font,
+            label,
+            fg_col,
+            rect.centerx,
+            rect.centery - use_font.get_height() // 2,
+            rect.width - 8,
+            align="center",
+        )
+
+    def _set_admin_filter(self, flt: str):
+        self.sound.play("click")
+        self.admin_filter = flt
+        self.admin_page = 0
+        if flt == "locked" and self.admin_detail_tab != "locked_list":
+            filtered = self._get_filtered_admin_accounts()
+            if filtered:
+                self.admin_selected_username = filtered[0]["username"]
+
+    def _select_admin_account(self, username: str):
+        self.sound.play("click")
+        self.admin_selected_username = username
+        self.admin_search_focused = False
+        if self.admin_detail_tab == "locked_list":
+            self.admin_detail_tab = "all_4"
+
+    def _set_admin_detail_tab(self, tab_id: str):
+        self.sound.play("click")
+        self.admin_detail_tab = tab_id
+        self.admin_search_focused = False
+
+    def _open_admin_add_modal(self):
+        self.sound.play("click")
+        self.admin_search_focused = False
+        self.admin_modal = "add"
+        self.admin_modal_focus = 0
+        self.admin_form = {
+            "username": "",
+            "password": "123456",
+            "status": "active",
+            "level": "1",
+            "total_xp": "100",
+            "gold": "500",
+            "unlocked_count": "2",
+            "streak_days": "1",
+            "last_device": "Web Browser (Tamaweb WASM)",
+            "lock_reason": "Gian lận Coin & XP (Cheat/Hack)",
+            "lock_duration_key": "24h",
+        }
+
+    def _open_admin_edit_modal(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        self.sound.play("click")
+        self.admin_search_focused = False
+        self.admin_modal = "edit"
+        self.admin_modal_focus = 0
+        self.admin_form = {
+            "username": acc["username"],
+            "password": str(acc.get("password") or "123456"),
+            "status": str(acc.get("status") or "active"),
+            "level": str(acc.get("level") or 1),
+            "total_xp": str(acc.get("total_xp") or 0),
+            "gold": str(acc.get("gold") or 300),
+            "unlocked_count": str(acc.get("unlocked_count") or 1),
+            "streak_days": str(acc.get("streak_days") or 1),
+            "last_device": str(acc.get("last_device") or "Web Browser (Tamaweb WASM)"),
+            "lock_reason": str(acc.get("lock_reason") or "Gian lận Coin & XP (Cheat/Hack)"),
+            "lock_duration_key": "24h",
+        }
+
+    def _open_admin_lock_modal(self, target_username: str = None):
+        if target_username:
+            self.admin_selected_username = target_username
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        if acc["username"] == "admin":
+            self.sound.play("refuse")
+            self._set_admin_notice("KHÔNG THỂ KHOÁ TÀI KHOẢN QUẢN TRỊ VIÊN GỐC!", COLOR_RED)
+            return
+        self.sound.play("click")
+        self.admin_search_focused = False
+        self.admin_modal = "lock"
+        self.admin_modal_focus = 0
+        self.admin_form["lock_reason"] = acc.get("lock_reason") or "Gian lận Coin & XP (Cheat/Hack)"
+        self.admin_form["lock_duration_key"] = "24h"
+
+    def _open_admin_delete_modal(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        if acc["username"] == "admin":
+            self.sound.play("refuse")
+            self._set_admin_notice("KHÔNG THỂ XOÁ TÀI KHOẢN QUẢN TRỊ VIÊN GỐC!", COLOR_RED)
+            return
+        self.sound.play("click")
+        self.admin_search_focused = False
+        self.admin_modal = "delete"
+
+    def _close_admin_modal(self):
+        self.sound.play("cancel")
+        self.admin_modal = None
+
+    def _submit_admin_add_or_edit(self):
+        try:
+            lvl = max(1, int(self.admin_form.get("level") or 1))
+        except Exception:
+            lvl = 1
+        try:
+            txp = max(0, int(self.admin_form.get("total_xp") or 0))
+        except Exception:
+            txp = 0
+        try:
+            gld = max(0, int(self.admin_form.get("gold") or 0))
+        except Exception:
+            gld = 300
+        try:
+            uc = max(1, int(self.admin_form.get("unlocked_count") or 1))
+        except Exception:
+            uc = 1
+        try:
+            strk = max(1, int(self.admin_form.get("streak_days") or 1))
+        except Exception:
+            strk = 1
+
+        payload = {
+            "username": self.admin_form.get("username", "").strip().lower(),
+            "password": self.admin_form.get("password", "").strip() or "123456",
+            "status": self.admin_form.get("status", "active"),
+            "level": lvl,
+            "total_xp": txp,
+            "gold": gld,
+            "unlocked_count": uc,
+            "streak_days": strk,
+            "last_device": self.admin_form.get("last_device", "Web Browser (Tamaweb WASM)"),
+        }
+
+        if self.admin_modal == "add":
+            ok, msg, _ = self.backend.admin_create_account(payload)
+            if not ok:
+                self.sound.play("refuse")
+                self._set_admin_notice(msg, COLOR_RED)
+                return
+            self.sound.play("cheer_success")
+            self.admin_selected_username = payload["username"]
+            self.admin_modal = None
+            self._refresh_admin_dashboard(keep_selection=True)
+            self._set_admin_notice(msg, COLOR_GREEN)
+        elif self.admin_modal == "edit":
+            target = self.admin_selected_username
+            ok, msg, _ = self.backend.admin_update_account(target, payload)
+            if not ok:
+                self.sound.play("refuse")
+                self._set_admin_notice(msg, COLOR_RED)
+                return
+            self.sound.play("cheer_success")
+            self.admin_modal = None
+            self._refresh_admin_dashboard(keep_selection=True)
+            self._set_admin_notice(msg, COLOR_GREEN)
+
+    def _submit_admin_lock(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        reason = self.admin_form.get("lock_reason", "").strip() or "Vi phạm quy định trò chơi"
+        dur_key = self.admin_form.get("lock_duration_key", "24h")
+        ok, msg, _ = self.backend.admin_lock_account(acc["username"], reason, dur_key)
+        if not ok:
+            self.sound.play("refuse")
+            self._set_admin_notice(msg, COLOR_RED)
+            return
+        self.sound.play("complete")
+        self.admin_modal = None
+        self._refresh_admin_dashboard(keep_selection=True)
+        self._set_admin_notice(msg, COLOR_RED)
+
+    def _exec_admin_unlock(self, target_username: str = None):
+        uname = target_username or self.admin_selected_username
+        if not uname:
+            return
+        ok, msg, _ = self.backend.admin_unlock_account(uname, "Quản trị viên mở khoá tài khoản")
+        if not ok:
+            self.sound.play("refuse")
+            self._set_admin_notice(msg, COLOR_RED)
+            return
+        self.sound.play("cheer_success")
+        self._refresh_admin_dashboard(keep_selection=True)
+        self._set_admin_notice(msg, COLOR_GREEN)
+
+    def _submit_admin_delete(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        ok, msg, _ = self.backend.admin_delete_account(acc["username"])
+        if not ok:
+            self.sound.play("refuse")
+            self._set_admin_notice(msg, COLOR_RED)
+            return
+        self.sound.play("complete")
+        self.admin_modal = None
+        self._refresh_admin_dashboard(keep_selection=False)
+        self._set_admin_notice(msg, COLOR_TEXT_ORANGE)
+
+    def _quick_adjust_game_stat(self, field: str, delta: int):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        self.sound.play("click")
+        new_val = max(1 if field in ("level", "unlocked_count", "streak_days") else 0, int(acc.get(field) or 0) + delta)
+        ok, msg, _ = self.backend.admin_update_account(acc["username"], {field: new_val})
+        if ok:
+            self._refresh_admin_dashboard(keep_selection=True)
+            self._set_admin_notice(f"ĐÃ CẬP NHẬT {field.upper()} = {new_val}!", COLOR_GREEN)
+
+    def _draw_admin_screen(self):
+        self.admin_click_areas.clear()
+        self.admin_modal_click_areas.clear()
+
+        # Bảo mật: Chỉ tài khoản admin mới có quyền truy cập trang quản trị
+        if self.backend.user_id != "admin" or self.backend.role != "admin":
+            self.is_admin_mode = False
+            return
+
+        # Khung nền lớn của Trang Quản Lý Tài Khoản (chuẩn đồ hoạ thẻ 3D Tamaweb)
+        panel = pygame.Rect(36, 16, WIN_W - 72, WIN_H - 32)
+        pygame.draw.rect(self.screen, (110, 65, 25, 90), panel.move(0, 7), border_radius=18)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_SHADOW, panel.move(0, 4), border_radius=18)
+        pygame.draw.rect(self.screen, COLOR_SURFACE, panel, border_radius=18)
+        pygame.draw.rect(self.screen, COLOR_BORDER, panel, 4, border_radius=18)
+
+        # =====================================================================
+        # 1. THANH HEADER QUẢN TRỊ VIÊN (LOGO TAMAWEB + MASCOT + CÔNG CỤ NHANH)
+        # =====================================================================
+        hdr_rect = pygame.Rect(50, 26, WIN_W - 100, 52)
+        self.screen.blit(self.striped_admin_hdr, hdr_rect.topleft)
+        pygame.draw.rect(self.screen, COLOR_BORDER, hdr_rect, 2, border_radius=12)
+
+        logo_adm = pygame.transform.smoothscale(self.logo_img, (108, 42))
+        self.screen.blit(logo_adm, (hdr_rect.x + 10, hdr_rect.y + 5))
+
+        frame_num = 1 if int(self.auth_anim_tick * 3.0) % 2 == 0 else 2
+        mascot_adm = pygame.transform.scale(self.auth_mascots[0].get_frame(frame_num), (38, 38))
+        self.screen.blit(mascot_adm, (hdr_rect.x + 124, hdr_rect.y + 7))
+
+        title_s = self.font_md.render("TRANG QUẢN LÝ TÀI KHOẢN - ADMIN PANEL", False, COLOR_TEXT_ORANGE)
+        self.screen.blit(title_s, (hdr_rect.x + 168, hdr_rect.y + 7))
+
+        if self.admin_notice_msg:
+            self._draw_clipped_text(self.screen, self.font_xs, f"• {self.admin_notice_msg}", self.admin_notice_color, hdr_rect.x + 168, hdr_rect.y + 30, 470)
+        else:
+            sub_txt = f"QUYỀN: ADMIN ({self.backend.user_id.upper()})  •  CƠ SỞ DỮ LIỆU: {self.admin_dashboard.get('database', 'PostgreSQL / SQLite')}"
+            self._draw_clipped_text(self.screen, self.font_xs, sub_txt, COLOR_PURPLE_BACK, hdr_rect.x + 168, hdr_rect.y + 30, 470)
+
+        # Thông báo thao tác (nếu có) hoặc các nút chức năng trên Header
+        locked_cnt = self.admin_stats.get("locked_accounts", 0)
+        btn_add_top = pygame.Rect(hdr_rect.right - 526, hdr_rect.y + 9, 128, 34)
+        btn_locked_top = pygame.Rect(hdr_rect.right - 392, hdr_rect.y + 9, 138, 34)
+        btn_refresh = pygame.Rect(hdr_rect.right - 248, hdr_rect.y + 9, 76, 34)
+        btn_to_game = pygame.Rect(hdr_rect.right - 166, hdr_rect.y + 9, 76, 34)
+        btn_logout = pygame.Rect(hdr_rect.right - 84, hdr_rect.y + 9, 76, 34)
+
+        self._draw_3d_button(btn_add_top, "+ THÊM TÀI KHOẢN", COLOR_GREEN, (255, 255, 255), (35, 135, 25), (30, 110, 20))
+        self.admin_click_areas.append((btn_add_top, self._open_admin_add_modal))
+
+        lk_active = (self.admin_detail_tab == "locked_list" or self.admin_filter == "locked")
+        self._draw_3d_button(
+            btn_locked_top,
+            f"DS BỊ KHOÁ ({locked_cnt})",
+            COLOR_RED if lk_active else (255, 230, 234),
+            (255, 255, 255) if lk_active else COLOR_RED,
+            COLOR_RED,
+            (150, 20, 45),
+        )
+        self.admin_click_areas.append((btn_locked_top, self._toggle_locked_accounts_view))
+
+        self._draw_3d_button(btn_refresh, "LÀM MỚI", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE)
+        self.admin_click_areas.append((btn_refresh, self._manual_refresh_admin))
+
+        self._draw_3d_button(btn_to_game, "VÀO GAME", COLOR_TEXT_ORANGE, (255, 255, 255), (190, 90, 10), (150, 65, 0))
+        self.admin_click_areas.append((btn_to_game, self._switch_admin_to_game))
+
+        self._draw_3d_button(btn_logout, "ĐĂNG XUẤT", COLOR_PURPLE_BACK, (255, 255, 255), (35, 0, 160), (25, 0, 120))
+        self.admin_click_areas.append((btn_logout, self._logout_account))
+
+        # =====================================================================
+        # 2. HÀNG 6 THẺ CHỈ SỐ THỐNG KÊ TỔNG QUAN (CLICK ĐỂ LỌC DANH SÁCH)
+        # =====================================================================
+        stat_Specs = [
+            ("all",      "TỔNG SỐ TÀI KHOẢN",      self.admin_stats.get("total_accounts", 0),     (255, 128, 0),  "TẤT CẢ TK"),
+            ("active",   "TK ĐANG HOẠT ĐỘNG",      self.admin_stats.get("active_accounts", 0),    (62, 185, 45),  "HOẠT ĐỘNG"),
+            ("today",    "ĐĂNG KÝ MỚI HÔM NAY",    self.admin_stats.get("new_today_accounts", 0), (35, 130, 225), "MỚI HÔM NAY"),
+            ("locked",   "SỐ TÀI KHOẢN BỊ KHOÁ",   self.admin_stats.get("locked_accounts", 0),    (237, 37, 78),  "ĐANG KHOÁ"),
+            ("online",   "NGƯỜI CHƠI ĐANG ONLINE", self.admin_stats.get("online_players", 0),     (18, 165, 130), "TRỰC TUYẾN"),
+            ("inactive", "TK KHÔNG HOẠT ĐỘNG",     self.admin_stats.get("inactive_accounts", 0),  (135, 105, 80), "NGƯNG HĐ"),
+        ]
+        card_w = 189
+        card_gap = 9
+        stat_y = 85
+        for idx, (flt_key, title_lbl, val_num, accent_col, badge_lbl) in enumerate(stat_Specs):
+            sx = 50 + idx * (card_w + card_gap)
+            s_rect = pygame.Rect(sx, stat_y, card_w, 68)
+            is_sel = (self.admin_filter == flt_key)
+            pygame.draw.rect(self.screen, COLOR_SURFACE_SHADOW, s_rect.move(0, 3), border_radius=11)
+            pygame.draw.rect(self.screen, (255, 250, 242) if is_sel else (255, 255, 255), s_rect, border_radius=11)
+            # Dải màu điểm nhấn trên đỉnh thẻ
+            top_strip = pygame.Rect(s_rect.x + 2, s_rect.y + 2, s_rect.width - 4, 7)
+            pygame.draw.rect(self.screen, accent_col, top_strip, border_radius=5)
+            pygame.draw.rect(self.screen, accent_col if is_sel else COLOR_BORDER, s_rect, 3 if is_sel else 2, border_radius=11)
+
+            # Số lượng lớn + Nhãn badge góc phải
+            num_s = self.font_lg.render(str(val_num), False, accent_col)
+            self.screen.blit(num_s, (s_rect.x + 12, s_rect.y + 13))
+
+            pill_r = pygame.Rect(s_rect.right - 92, s_rect.y + 15, 84, 18)
+            pygame.draw.rect(self.screen, accent_col, pill_r, border_radius=6)
+            self._draw_clipped_text(self.screen, self.font_xs, badge_lbl, (255, 255, 255), pill_r.centerx, pill_r.y + 2, 80, align="center")
+
+            self._draw_clipped_text(self.screen, self.font_xs, title_lbl, (75, 45, 20), s_rect.x + 10, s_rect.y + 46, s_rect.width - 16)
+            self.admin_click_areas.append((s_rect, lambda f=flt_key: self._set_admin_filter(f)))
+
+        # =====================================================================
+        # 3. CỘT TRÁI: DANH SÁCH TÀI KHOẢN + TÌM KIẾM + BỘ LỌC (x=50, y=161)
+        # =====================================================================
+        left_box = pygame.Rect(50, 161, 456, 526)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_SHADOW, left_box.move(0, 3), border_radius=14)
+        pygame.draw.rect(self.screen, (255, 252, 247), left_box, border_radius=14)
+        pygame.draw.rect(self.screen, COLOR_BORDER, left_box, 3, border_radius=14)
+
+        # Ô tìm kiếm tài khoản
+        search_rect = pygame.Rect(left_box.x + 10, left_box.y + 10, 306, 30)
+        pygame.draw.rect(self.screen, (255, 255, 255), search_rect, border_radius=8)
+        pygame.draw.rect(self.screen, COLOR_PURPLE_BACK if self.admin_search_focused else COLOR_BORDER, search_rect, 2, border_radius=8)
+        blink = "|" if (self.admin_search_focused and int(self.auth_anim_tick * 2.5) % 2 == 0) else ""
+        if self.admin_search_query or self.admin_search_focused:
+            q_disp = f"Tìm: {self.admin_search_query}{blink}"
+            q_col = (35, 20, 10)
+        else:
+            q_disp = "Tìm kiếm ID, Username, Tên Pet..."
+            q_col = (180, 160, 140)
+        self._draw_clipped_text(self.screen, self.font_xs, q_disp, q_col, search_rect.x + 10, search_rect.y + 8, search_rect.width - 20)
+        self.admin_click_areas.append((search_rect, self._focus_admin_search))
+
+        btn_clr_q = pygame.Rect(search_rect.right + 5, search_rect.y, 32, 30)
+        self._draw_3d_button(btn_clr_q, "X", COLOR_SURFACE_SHADOW, COLOR_TEXT_ORANGE)
+        self.admin_click_areas.append((btn_clr_q, self._clear_admin_search))
+
+        btn_new_l = pygame.Rect(btn_clr_q.right + 6, search_rect.y, 87, 30)
+        self._draw_3d_button(btn_new_l, "+ THÊM MỚI", COLOR_GREEN, (255, 255, 255), (35, 135, 25), (30, 110, 20))
+        self.admin_click_areas.append((btn_new_l, self._open_admin_add_modal))
+
+        # Thanh nút lọc nhanh
+        filter_tabs = [
+            ("all", "TẤT CẢ"),
+            ("active", "HOẠT ĐỘNG"),
+            ("online", "ONLINE"),
+            ("locked", "BỊ KHOÁ"),
+            ("today", "HÔM NAY"),
+            ("inactive", "K.HĐ"),
+        ]
+        fx = left_box.x + 10
+        fy = left_box.y + 46
+        for f_key, f_lbl in filter_tabs:
+            fw = 70 if len(f_lbl) <= 7 else 82
+            if f_key == "inactive":
+                fw = 56
+            f_rect = pygame.Rect(fx, fy, fw, 23)
+            act = (self.admin_filter == f_key)
+            pygame.draw.rect(self.screen, COLOR_TEXT_ORANGE if act else COLOR_SURFACE_SHADOW, f_rect, border_radius=6)
+            pygame.draw.rect(self.screen, COLOR_BORDER, f_rect, 1, border_radius=6)
+            self._draw_clipped_text(
+                self.screen,
+                self.font_xs,
+                f_lbl,
+                (255, 255, 255) if act else (95, 55, 20),
+                f_rect.centerx,
+                f_rect.y + 4,
+                fw - 4,
+                align="center",
+            )
+            self.admin_click_areas.append((f_rect, lambda k=f_key: self._set_admin_filter(k)))
+            fx += fw + 4
+
+        # Tiêu đề cột bảng danh sách
+        tbl_hdr = pygame.Rect(left_box.x + 10, left_box.y + 74, left_box.width - 20, 22)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_ACTIVE, tbl_hdr, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, "ID / USERNAME", (90, 45, 10), tbl_hdr.x + 44, tbl_hdr.y + 4, 150)
+        self._draw_clipped_text(self.screen, self.font_xs, "LV • COIN • CHUỖI", (90, 45, 10), tbl_hdr.x + 195, tbl_hdr.y + 4, 130)
+        self._draw_clipped_text(self.screen, self.font_xs, "TRẠNG THÁI", (90, 45, 10), tbl_hdr.right - 84, tbl_hdr.y + 4, 80)
+
+        # Các dòng tài khoản (7 dòng / trang)
+        filtered_accs = self._get_filtered_admin_accounts()
+        per_page = 7
+        total_pages = max(1, (len(filtered_accs) + per_page - 1) // per_page)
+        self.admin_page = max(0, min(self.admin_page, total_pages - 1))
+        page_items = filtered_accs[self.admin_page * per_page : (self.admin_page + 1) * per_page]
+
+        row_y = left_box.y + 100
+        row_h = 50
+        if not page_items:
+            empty_s = self.font_sm.render("KHÔNG CÓ TÀI KHOẢN NÀO PHÙ HỢP!", False, COLOR_TEXT_ORANGE)
+            self.screen.blit(empty_s, (left_box.centerx - empty_s.get_width() // 2, left_box.y + 220))
+        else:
+            for acc in page_items:
+                is_cur = (acc["username"] == self.admin_selected_username)
+                r_rect = pygame.Rect(left_box.x + 10, row_y, left_box.width - 20, row_h - 4)
+                bg_r = (255, 232, 204) if is_cur else (255, 255, 255)
+                bd_r = COLOR_PURPLE_BACK if is_cur else COLOR_BORDER
+                pygame.draw.rect(self.screen, bg_r, r_rect, border_radius=9)
+                pygame.draw.rect(self.screen, bd_r, r_rect, 3 if is_cur else 1, border_radius=9)
+
+                # Avatar sprite nhân vật của tài khoản
+                av_box = pygame.Rect(r_rect.x + 6, r_rect.y + 6, 34, 34)
+                pygame.draw.rect(self.screen, COLOR_SURFACE, av_box, border_radius=7)
+                pygame.draw.rect(self.screen, COLOR_BORDER, av_box, 1, border_radius=7)
+                spr = self._get_admin_char_sprite(acc.get("character_file"), frame_num if is_cur else 1, 30)
+                self.screen.blit(spr, (av_box.x + 2, av_box.y + 2))
+
+                # ID + Username
+                u_title = f"#{acc['id']} {acc['username'].upper()}"
+                if acc.get("role") == "admin":
+                    u_title += " [ADMIN]"
+                self._draw_clipped_text(self.screen, self.font_xs, u_title, COLOR_PURPLE_BACK if is_cur else (45, 25, 10), r_rect.x + 46, r_rect.y + 6, 145)
+                self._draw_clipped_text(self.screen, self.font_xs, f"Ngày: {acc.get('created_at_str', '')[:10]}", (130, 100, 75), r_rect.x + 46, r_rect.y + 25, 145)
+
+                # Level, Coin, Streak
+                self._draw_clipped_text(self.screen, self.font_xs, f"LV.{acc['level']}  •  ${acc['gold']:,}", COLOR_TEXT_ORANGE, r_rect.x + 195, r_rect.y + 6, 135)
+                self._draw_clipped_text(self.screen, self.font_xs, f"XP:{acc['total_xp']} • {acc['streak_days']} ngày", (110, 85, 60), r_rect.x + 195, r_rect.y + 25, 135)
+
+                # Badge trạng thái
+                st = acc.get("status", "active")
+                if st == "locked":
+                    b_col, b_txt = COLOR_RED, "BỊ KHOÁ"
+                elif st == "inactive":
+                    b_col, b_txt = (140, 115, 95), "K.HOẠT ĐỘNG"
+                elif acc.get("is_online"):
+                    b_col, b_txt = (22, 168, 95), "● ONLINE"
+                else:
+                    b_col, b_txt = (85, 180, 60), "HOẠT ĐỘNG"
+
+                st_pill = pygame.Rect(r_rect.right - 92, r_rect.y + 12, 84, 22)
+                pygame.draw.rect(self.screen, b_col, st_pill, border_radius=7)
+                self._draw_clipped_text(self.screen, self.font_xs, b_txt, (255, 255, 255), st_pill.centerx, st_pill.y + 4, 78, align="center")
+
+                uname_val = acc["username"]
+                self.admin_click_areas.append((r_rect, lambda u=uname_val: self._select_admin_account(u)))
+                row_y += row_h
+
+        # Thanh phân trang dưới đáy cột trái
+        pag_y = left_box.bottom - 34
+        btn_prev = pygame.Rect(left_box.x + 10, pag_y, 82, 26)
+        btn_next = pygame.Rect(left_box.right - 92, pag_y, 82, 26)
+        self._draw_3d_button(btn_prev, "< TRƯỚC", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE)
+        self._draw_3d_button(btn_next, "TIẾP >", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE)
+        self.admin_click_areas.append((btn_prev, lambda: self._change_admin_page(-1)))
+        self.admin_click_areas.append((btn_next, lambda: self._change_admin_page(1)))
+
+        pag_lbl = f"TRANG {self.admin_page + 1}/{total_pages} ({len(filtered_accs)} TK)"
+        self._draw_clipped_text(self.screen, self.font_xs, pag_lbl, (95, 60, 30), left_box.centerx, pag_y + 6, 240, align="center")
+
+        # =====================================================================
+        # 4. CỘT PHẢI: CHI TIẾT TÀI KHOẢN (4 PHẦN) & THAO TÁC (x=514, y=161)
+        # =====================================================================
+        right_box = pygame.Rect(514, 161, 716, 526)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_SHADOW, right_box.move(0, 3), border_radius=14)
+        pygame.draw.rect(self.screen, (255, 252, 247), right_box, border_radius=14)
+        pygame.draw.rect(self.screen, COLOR_BORDER, right_box, 3, border_radius=14)
+
+        sel_acc = self._get_selected_admin_account()
+        if not sel_acc:
+            return
+
+        # 4A. Banner Hồ sơ Người chơi đang chọn + Cụm nút Thêm / Sửa / Khoá / Mở khoá / Xoá
+        prof_bar = pygame.Rect(right_box.x + 10, right_box.y + 10, right_box.width - 20, 74)
+        pygame.draw.rect(self.screen, COLOR_SURFACE, prof_bar, border_radius=11)
+        pygame.draw.rect(self.screen, COLOR_BORDER, prof_bar, 2, border_radius=11)
+
+        # Khung cảnh game thu nhỏ + Nhân vật nhún nhảy
+        mini_scene = pygame.Rect(prof_bar.x + 8, prof_bar.y + 7, 60, 60)
+        mini_surf = pygame.Surface((60, 60))
+        mini_surf.blit(pygame.transform.scale(self.get_current_sky(), (60, 60)), (0, 0))
+        mini_surf.blit(pygame.transform.scale(self.scene_bgs["park"], (60, 68)), (0, -8))
+        p_spr = self._get_admin_char_sprite(sel_acc.get("character_file"), frame_num, 44)
+        mini_surf.blit(p_spr, (8, 12))
+        self.screen.blit(mini_surf, mini_scene.topleft)
+        pygame.draw.rect(self.screen, COLOR_BORDER, mini_scene, 2, border_radius=8)
+
+        # Thông tin tóm tắt trên Banner
+        head_line = f"{sel_acc['player_code']} (ID #{sel_acc['id']})  •  @{sel_acc['username'].upper()}"
+        self._draw_clipped_text(self.screen, self.font_md, head_line, COLOR_PURPLE_BACK, prof_bar.x + 78, prof_bar.y + 8, 330)
+
+        st = sel_acc.get("status", "active")
+        st_label = sel_acc.get("status_vn", "Đang hoạt động").upper()
+        on_label = "• ĐANG ONLINE" if sel_acc.get("is_online") else "• OFFLINE"
+        st_col = COLOR_RED if st == "locked" else ((130, 105, 80) if st == "inactive" else (30, 155, 55))
+        self._draw_clipped_text(
+            self.screen,
+            self.font_xs,
+            f"TRẠNG THÁI: {st_label}   |   {on_label}   |   VAI TRÒ: {sel_acc.get('role', 'user').upper()}",
+            st_col,
+            prof_bar.x + 78,
+            prof_bar.y + 32,
+            365,
+        )
+        sub_info = f"Tạo: {sel_acc.get('created_at_str')}  •  Thiết bị: {sel_acc.get('last_device')}"
+        self._draw_clipped_text(self.screen, self.font_xs, sub_info, (115, 80, 50), prof_bar.x + 78, prof_bar.y + 51, 365)
+
+        # Cụm nút CRUD & Khoá / Mở khoá ở góc phải Banner
+        act_x = prof_bar.right - 242
+        btn_edit_acc = pygame.Rect(act_x, prof_bar.y + 8, 114, 26)
+        btn_del_acc = pygame.Rect(act_x + 120, prof_bar.y + 8, 114, 26)
+        btn_lock_toggle = pygame.Rect(act_x, prof_bar.y + 40, 234, 26)
+
+        self._draw_3d_button(btn_edit_acc, "SỬA TÀI KHOẢN", COLOR_TEXT_ORANGE, (255, 255, 255), (185, 85, 0), (145, 65, 0))
+        self.admin_click_areas.append((btn_edit_acc, self._open_admin_edit_modal))
+
+        self._draw_3d_button(btn_del_acc, "XOÁ TÀI KHOẢN", (195, 45, 65), (255, 255, 255), (140, 20, 35), (110, 15, 30))
+        self.admin_click_areas.append((btn_del_acc, self._open_admin_delete_modal))
+
+        if st == "locked":
+            self._draw_3d_button(btn_lock_toggle, "MỞ KHOÁ TÀI KHOẢN NGAY", (22, 168, 95), (255, 255, 255), (15, 120, 65), (10, 95, 50))
+            self.admin_click_areas.append((btn_lock_toggle, lambda u=sel_acc["username"]: self._exec_admin_unlock(u)))
+        else:
+            self._draw_3d_button(btn_lock_toggle, "KHOÁ TÀI KHOẢN (LÝ DO & HẠN)", COLOR_RED, (255, 255, 255), (165, 20, 45), (130, 10, 35))
+            self.admin_click_areas.append((btn_lock_toggle, lambda u=sel_acc["username"]: self._open_admin_lock_modal(u)))
+
+        # 4B. Thanh chuyển đổi 4 Phần thông tin
+        tab_bar_y = right_box.y + 90
+
+        detail_tabs = [
+            ("all_4",       "TỔNG HỢP 4 PHẦN"),
+            ("part1",       "1. TT CÁ NHÂN"),
+            ("part2",       "2. TT TRÒ CHƠI"),
+            ("part3",       "3. HOẠT ĐỘNG"),
+            ("part4",       "4. LS XỬ LÝ"),
+            ("locked_list", f"DS BỊ KHOÁ ({locked_cnt})"),
+        ]
+        tx = right_box.x + 10
+        tw = (right_box.width - 20 - 5 * 5) // 6
+        for t_id, t_lbl in detail_tabs:
+            t_rect = pygame.Rect(tx, tab_bar_y, tw, 26)
+            is_t = (self.admin_detail_tab == t_id)
+            t_bg = COLOR_PURPLE_BACK if is_t else (COLOR_RED if t_id == "locked_list" and locked_cnt > 0 else COLOR_SURFACE_SHADOW)
+            t_fg = (255, 255, 255) if (is_t or (t_id == "locked_list" and locked_cnt > 0)) else (85, 45, 15)
+            pygame.draw.rect(self.screen, t_bg, t_rect, border_radius=7)
+            pygame.draw.rect(self.screen, COLOR_BORDER, t_rect, 2 if is_t else 1, border_radius=7)
+            self._draw_clipped_text(self.screen, self.font_xs, t_lbl, t_fg, t_rect.centerx, t_rect.y + 5, tw - 6, align="center")
+            self.admin_click_areas.append((t_rect, lambda k=t_id: self._set_admin_detail_tab(k)))
+            tx += tw + 5
+
+        content_y = tab_bar_y + 32
+        content_rect = pygame.Rect(right_box.x + 10, content_y, right_box.width - 20, right_box.bottom - content_y - 10)
+
+        if self.admin_detail_tab == "all_4":
+            self._draw_admin_four_sections_grid(content_rect, sel_acc)
+        elif self.admin_detail_tab == "part1":
+            self._draw_admin_part1_expanded(content_rect, sel_acc)
+        elif self.admin_detail_tab == "part2":
+            self._draw_admin_part2_expanded(content_rect, sel_acc)
+        elif self.admin_detail_tab == "part3":
+            self._draw_admin_part3_expanded(content_rect, sel_acc)
+        elif self.admin_detail_tab == "part4":
+            self._draw_admin_part4_expanded(content_rect, sel_acc)
+        elif self.admin_detail_tab == "locked_list":
+            self._draw_admin_locked_accounts_table(content_rect)
+
+        # =====================================================================
+        # 5. MODAL HỘP THOẠI (THÊM / SỬA / KHOÁ / XOÁ TÀI KHOẢN)
+        # =====================================================================
+        if self.admin_modal:
+            self._draw_admin_modal_overlay()
+
+    def _draw_section_card_frame(self, rect: pygame.Rect, title: str, badge_txt: str = "", header_col: tuple = COLOR_STRIPE_A1, tab_target: str = None):
+        pygame.draw.rect(self.screen, COLOR_SURFACE_SHADOW, rect.move(0, 2), border_radius=11)
+        pygame.draw.rect(self.screen, (255, 255, 255), rect, border_radius=11)
+        hdr = pygame.Rect(rect.x + 2, rect.y + 2, rect.width - 4, 26)
+        pygame.draw.rect(self.screen, header_col, hdr, border_radius=9)
+        pygame.draw.rect(self.screen, COLOR_BORDER, rect, 2, border_radius=11)
+        pygame.draw.line(self.screen, COLOR_BORDER, (rect.x, hdr.bottom), (rect.right, hdr.bottom), 2)
+        self._draw_clipped_text(self.screen, self.font_xs, title, COLOR_PURPLE_BACK, hdr.x + 10, hdr.y + 5, hdr.width - 95)
+        if badge_txt:
+            b_rect = pygame.Rect(hdr.right - 84, hdr.y + 3, 78, 20)
+            pygame.draw.rect(self.screen, COLOR_SURFACE, b_rect, border_radius=6)
+            pygame.draw.rect(self.screen, COLOR_BORDER, b_rect, 1, border_radius=6)
+            self._draw_clipped_text(self.screen, self.font_xs, badge_txt, COLOR_TEXT_ORANGE, b_rect.centerx, b_rect.y + 2, 72, align="center")
+            if tab_target:
+                self.admin_click_areas.append((b_rect, lambda t=tab_target: self._set_admin_detail_tab(t)))
+
+    def _draw_kv_row(self, x: int, y: int, w: int, label: str, val: str, val_col: tuple = (40, 25, 10)):
+        pygame.draw.rect(self.screen, (255, 248, 238), (x, y, w, 24), border_radius=6)
+        pygame.draw.rect(self.screen, (245, 222, 195), (x, y, w, 24), 1, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, label, (115, 75, 40), x + 8, y + 4, int(w * 0.46))
+        self._draw_clipped_text(self.screen, self.font_xs, val, val_col, x + w - 8, y + 4, int(w * 0.52), align="right")
+
+    def _draw_admin_four_sections_grid(self, area: pygame.Rect, acc: dict):
+        """Hiển thị đồng thời cả 4 Phần thông tin tài khoản theo bố cục lưới 2x2 chuẩn đồ hoạ game"""
+        gap = 10
+        cw = (area.width - gap) // 2
+        ch = (area.height - gap) // 2
+
+        c1 = pygame.Rect(area.x, area.y, cw, ch)
+        c2 = pygame.Rect(area.x + cw + gap, area.y, cw, ch)
+        c3 = pygame.Rect(area.x, area.y + ch + gap, cw, ch)
+        c4 = pygame.Rect(area.x + cw + gap, area.y + ch + gap, cw, ch)
+
+        # ---------------------------------------------------------------------
+        # PHẦN 1. THÔNG TIN CÁ NHÂN
+        # ---------------------------------------------------------------------
+        self._draw_section_card_frame(c1, "PHẦN 1. THÔNG TIN CÁ NHÂN", "CHI TIẾT >", COLOR_STRIPE_A1, "part1")
+        st = acc.get("status", "active")
+        st_col = COLOR_RED if st == "locked" else ((130, 105, 80) if st == "inactive" else (25, 155, 55))
+        st_full = f"{acc.get('status_vn', 'Đang hoạt động')} ({'Online' if acc.get('is_online') else 'Offline'})"
+
+        y1 = c1.y + 34
+        self._draw_kv_row(c1.x + 8, y1,      cw - 16, "1. ID người chơi:", f"#{acc['id']} ({acc['player_code']})", COLOR_PURPLE_BACK)
+        self._draw_kv_row(c1.x + 8, y1 + 28, cw - 16, "2. Username:", f"{acc['username']} ({acc.get('role', 'user').upper()})", COLOR_TEXT_ORANGE)
+        self._draw_kv_row(c1.x + 8, y1 + 56, cw - 16, "3. Ngày tạo TK:", acc.get("created_at_str", "--"))
+        self._draw_kv_row(c1.x + 8, y1 + 84, cw - 16, "4. Trạng thái TK:", st_full, st_col)
+
+        pw_raw = str(acc.get("password") or "******")
+        pw_disp = pw_raw if self.admin_show_user_pw else ("*" * max(6, len(pw_raw)))
+        self._draw_kv_row(c1.x + 8, y1 + 112, cw - 82, "Mật khẩu:", pw_disp, (90, 60, 35))
+        btn_pw_t = pygame.Rect(c1.right - 70, y1 + 112, 62, 24)
+        self._draw_3d_button(btn_pw_t, "ẨN" if self.admin_show_user_pw else "HIỆN", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE, radius=6)
+        self.admin_click_areas.append((btn_pw_t, self._toggle_admin_user_pw))
+
+        # ---------------------------------------------------------------------
+        # PHẦN 2. THÔNG TIN TRÒ CHƠI
+        # ---------------------------------------------------------------------
+        self._draw_section_card_frame(c2, "PHẦN 2. THÔNG TIN TRÒ CHƠI", "CHI TIẾT >", COLOR_STRIPE_A2, "part2")
+        y2 = c2.y + 34
+        self._draw_kv_row(c2.x + 8, y2,       cw - 16, "1. Level hiện tại:", f"Level {acc['level']} ({acc.get('pet_name', 'TAMA')})", COLOR_TEXT_ORANGE)
+        self._draw_kv_row(c2.x + 8, y2 + 28,  cw - 16, "2. Tổng XP:", f"{acc['total_xp']:,} XP", COLOR_PURPLE_BACK)
+        self._draw_kv_row(c2.x + 8, y2 + 56,  cw - 16, "3. Tổng Coin:", f"{acc['gold']:,} Coin ($)", (210, 125, 0))
+        self._draw_kv_row(c2.x + 8, y2 + 84,  cw - 16, "4. Nhân vật mở khoá:", f"{acc['unlocked_count']} Nhân vật", (25, 150, 65))
+        self._draw_kv_row(c2.x + 8, y2 + 112, cw - 16, "5. Chuỗi ngày duy trì:", f"{acc['streak_days']} Ngày liên tiếp", COLOR_RED)
+
+        # ---------------------------------------------------------------------
+        # PHẦN 3. HOẠT ĐỘNG TÀI KHOẢN
+        # ---------------------------------------------------------------------
+        self._draw_section_card_frame(c3, "PHẦN 3. HOẠT ĐỘNG TÀI KHOẢN", "NHẬT KÝ >", COLOR_STRIPE_B2, "part3")
+        y3 = c3.y + 34
+        self._draw_kv_row(c3.x + 8, y3,      cw - 16, "1. Đăng nhập cuối:", acc.get("last_login_str", "--"))
+        self._draw_kv_row(c3.x + 8, y3 + 27, cw - 16, "2. Tổng số lần ĐN:", f"{acc.get('login_count', 1)} Lần", COLOR_PURPLE_BACK)
+        self._draw_kv_row(c3.x + 8, y3 + 54, cw - 16, "4. Thiết bị ĐN:", acc.get("last_device", "Web Browser"))
+
+        # 3. Lịch sử hoạt động (tóm tắt các sự kiện gần nhất)
+        act_box = pygame.Rect(c3.x + 8, y3 + 81, cw - 16, c3.bottom - (y3 + 87))
+        pygame.draw.rect(self.screen, (255, 248, 238), act_box, border_radius=6)
+        pygame.draw.rect(self.screen, (245, 222, 195), act_box, 1, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, "3. Lịch sử hoạt động gần đây:", COLOR_TEXT_ORANGE, act_box.x + 6, act_box.y + 3, act_box.width - 12)
+        acts = acc.get("activity_history") or []
+        ay = act_box.y + 20
+        for act_item in acts[:2]:
+            line = f"• [{act_item.get('time_str', '')[:16]}] {act_item.get('description', '')}"
+            self._draw_clipped_text(self.screen, self.font_xs, line, (65, 45, 25), act_box.x + 6, ay, act_box.width - 12)
+            ay += 17
+
+        # ---------------------------------------------------------------------
+        # PHẦN 4. LỊCH SỬ XỬ LÝ (KHOÁ / MỞ KHOÁ TÀI KHOẢN)
+        # ---------------------------------------------------------------------
+        self._draw_section_card_frame(c4, "PHẦN 4. LỊCH SỬ XỬ LÝ", "XỬ LÝ >", COLOR_STRIPE_B1, "part4")
+        y4 = c4.y + 34
+        locks = acc.get("lock_history") or []
+        latest_lk = locks[0] if locks else None
+
+        if st == "locked":
+            cur_reason = acc.get("lock_reason") or (latest_lk.get("reason") if latest_lk else "Vi phạm quy định")
+            cur_by = acc.get("locked_by") or (latest_lk.get("performed_by") if latest_lk else "admin")
+            cur_time = acc.get("locked_at_str") if acc.get("locked_at_str") != "--" else (latest_lk.get("time_str") if latest_lk else "--")
+            cur_dur = f"ĐANG KHOÁ ({acc.get('lock_duration_label', 'Vĩnh viễn')} -> {acc.get('locked_until_str', '--')})"
+            st_lk_col = COLOR_RED
+        elif latest_lk:
+            cur_reason = latest_lk.get("reason", "--")
+            cur_by = latest_lk.get("performed_by", "admin")
+            cur_time = latest_lk.get("time_str", "--")
+            cur_dur = f"{latest_lk.get('action', 'MỞ KHOÁ')} ({len(locks)} lần xử lý)"
+            st_lk_col = (25, 150, 65)
+        else:
+            cur_reason = "Chưa từng bị khoá"
+            cur_by = "admin"
+            cur_time = "--"
+            cur_dur = "Tài khoản trong sạch (0 lần khoá)"
+            st_lk_col = (25, 150, 65)
+
+        self._draw_kv_row(c4.x + 8, y4,       cw - 16, "1. Lịch sử khoá TK:", cur_dur, st_lk_col)
+        self._draw_kv_row(c4.x + 8, y4 + 28,  cw - 16, "2. Lý do khoá:", cur_reason, COLOR_RED if st == "locked" else (60, 40, 25))
+        self._draw_kv_row(c4.x + 8, y4 + 56,  cw - 16, "3. Người thực hiện:", cur_by.upper(), COLOR_PURPLE_BACK)
+        self._draw_kv_row(c4.x + 8, y4 + 84,  cw - 16, "4. Thời gian xử lý:", cur_time)
+
+        # Nút thao tác nhanh trong Phần 4
+        b_lk1 = pygame.Rect(c4.x + 8, y4 + 112, (cw - 22) // 2, 24)
+        b_lk2 = pygame.Rect(b_lk1.right + 6, y4 + 112, (cw - 22) // 2, 24)
+        if st == "locked":
+            self._draw_3d_button(b_lk1, "MỞ KHOÁ TK", (22, 168, 95), (255, 255, 255), (15, 120, 65), (10, 95, 50), radius=6)
+            self.admin_click_areas.append((b_lk1, lambda u=acc["username"]: self._exec_admin_unlock(u)))
+        else:
+            self._draw_3d_button(b_lk1, "KHOÁ TÀI KHOẢN", COLOR_RED, (255, 255, 255), (165, 20, 45), (130, 10, 35), radius=6)
+            self.admin_click_areas.append((b_lk1, lambda u=acc["username"]: self._open_admin_lock_modal(u)))
+
+        self._draw_3d_button(b_lk2, "XEM DS BỊ KHOÁ", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE, radius=6)
+        self.admin_click_areas.append((b_lk2, lambda: self._set_admin_detail_tab("locked_list")))
+
+    def _draw_admin_part1_expanded(self, area: pygame.Rect, acc: dict):
+        self._draw_section_card_frame(area, "PHẦN 1. THÔNG TIN CÁ NHÂN (CHI TIẾT HỒ SƠ)", "< VỀ 4 PHẦN", COLOR_STRIPE_A1, "all_4")
+        y = area.y + 42
+        w = area.width - 24
+        x = area.x + 12
+
+        self._draw_kv_row(x, y,       w, "1. ID Người chơi (Player ID):", f"ID #{acc['id']}  •  Mã định danh: {acc['player_code']}", COLOR_PURPLE_BACK)
+        self._draw_kv_row(x, y + 34,  w, "2. Tên đăng nhập (Username):", f"{acc['username']}  (Vai trò: {'Quản trị viên - ADMIN' if acc.get('role')=='admin' else 'Người chơi - USER'})", COLOR_TEXT_ORANGE)
+        self._draw_kv_row(x, y + 68,  w, "3. Ngày tạo tài khoản:", f"{acc.get('created_at_str')}  ({'Đăng ký mới hôm nay' if acc.get('is_registered_today') else 'Tài khoản đã xác thực'})")
+        st = acc.get("status", "active")
+        st_col = COLOR_RED if st == "locked" else ((130, 105, 80) if st == "inactive" else (25, 155, 55))
+        self._draw_kv_row(x, y + 102, w, "4. Trạng thái tài khoản:", f"{acc.get('status_vn', '').upper()}  •  Kết nối hiện tại: {'ĐANG ONLINE' if acc.get('is_online') else 'OFFLINE'}", st_col)
+
+        pw_raw = str(acc.get("password") or "123456")
+        pw_disp = pw_raw if self.admin_show_user_pw else ("*" * max(6, len(pw_raw)))
+        self._draw_kv_row(x, y + 136, w - 110, "5. Mật khẩu đăng nhập:", pw_disp)
+        btn_pw = pygame.Rect(x + w - 102, y + 136, 102, 24)
+        self._draw_3d_button(btn_pw, "ẨN MẬT KHẨU" if self.admin_show_user_pw else "HIỆN MẬT KHẨU", COLOR_SURFACE_ACTIVE, COLOR_TEXT_ORANGE, radius=6)
+        self.admin_click_areas.append((btn_pw, self._toggle_admin_user_pw))
+
+        # Chuyển nhanh trạng thái tài khoản
+        lbl_st = self.font_xs.render("ĐỔI NHANH TRẠNG THÁI TÀI KHOẢN:", False, COLOR_TEXT_ORANGE)
+        self.screen.blit(lbl_st, (x, y + 178))
+
+        b1 = pygame.Rect(x, y + 200, 180, 32)
+        b2 = pygame.Rect(x + 190, y + 200, 180, 32)
+        b3 = pygame.Rect(x + 380, y + 200, 180, 32)
+        self._draw_3d_button(b1, "ĐẶT: ĐANG HOẠT ĐỘNG", (25, 165, 70), (255, 255, 255), (15, 120, 50), (10, 90, 35))
+        self._draw_3d_button(b2, "ĐẶT: KHÔNG HOẠT ĐỘNG", (140, 110, 85), (255, 255, 255), (100, 75, 55), (80, 60, 40))
+        self._draw_3d_button(b3, "KHOÁ TÀI KHOẢN NÀY", COLOR_RED, (255, 255, 255), (165, 20, 45), (130, 10, 35))
+        self.admin_click_areas.append((b1, lambda: self._quick_set_status("active")))
+        self.admin_click_areas.append((b2, lambda: self._quick_set_status("inactive")))
+        self.admin_click_areas.append((b3, lambda u=acc["username"]: self._open_admin_lock_modal(u)))
+
+    def _draw_admin_part2_expanded(self, area: pygame.Rect, acc: dict):
+        self._draw_section_card_frame(area, "PHẦN 2. THÔNG TIN TRÒ CHƠI (CHỈ SỐ & NHÂN VẬT)", "< VỀ 4 PHẦN", COLOR_STRIPE_A2, "all_4")
+        x = area.x + 12
+        y = area.y + 40
+        w = area.width - 24
+
+        rows_spec = [
+            ("1. Level hiện tại:", f"Cấp độ {acc['level']} (Thú cưng: {acc.get('pet_name', 'TAMA')})", "level", 1, COLOR_TEXT_ORANGE),
+            ("2. Tổng điểm kinh nghiệm (XP):", f"{acc['total_xp']:,} XP", "total_xp", 100, COLOR_PURPLE_BACK),
+            ("3. Tổng số tiền (Coin):", f"{acc['gold']:,} Coin ($)", "gold", 200, (210, 125, 0)),
+            ("4. Số lượng nhân vật mở khoá:", f"{acc['unlocked_count']} Nhân vật Tamagotchi", "unlocked_count", 1, (25, 150, 65)),
+            ("5. Chuỗi ngày duy trì (Streak):", f"{acc['streak_days']} Ngày liên tiếp", "streak_days", 1, COLOR_RED),
+        ]
+        for idx, (lbl, val_s, field_key, step, col) in enumerate(rows_spec):
+            ry = y + idx * 34
+            self._draw_kv_row(x, ry, w - 134, lbl, val_s, col)
+            bm = pygame.Rect(x + w - 126, ry, 58, 24)
+            bp = pygame.Rect(x + w - 62, ry, 62, 24)
+            self._draw_3d_button(bm, f"-{step}", COLOR_SURFACE_SHADOW, COLOR_TEXT_ORANGE, radius=6)
+            self._draw_3d_button(bp, f"+{step}", COLOR_SURFACE_ACTIVE, COLOR_PURPLE_BACK, radius=6)
+            self.admin_click_areas.append((bm, lambda f=field_key, d=-step: self._quick_adjust_game_stat(f, d)))
+            self.admin_click_areas.append((bp, lambda f=field_key, d=step: self._quick_adjust_game_stat(f, d)))
+
+        # Bộ sưu tập nhân vật đã mở khoá
+        gal_box = pygame.Rect(x, y + 180, w, area.bottom - (y + 190))
+        pygame.draw.rect(self.screen, (255, 248, 238), gal_box, border_radius=9)
+        pygame.draw.rect(self.screen, COLOR_BORDER, gal_box, 2, border_radius=9)
+        self._draw_clipped_text(self.screen, self.font_xs, f"BỘ SƯU TẬP NHÂN VẬT ĐÃ MỞ KHOÁ ({acc['unlocked_count']} NHÂN VẬT):", COLOR_PURPLE_BACK, gal_box.x + 10, gal_box.y + 8, gal_box.width - 20)
+
+        sample_pool = [
+            "resources/img/character/chara_1b.png",
+            "resources/img/character/chara_21b.png",
+            "resources/img/character/chara_82b.png",
+            "resources/img/character/chara_133b.png",
+            "resources/img/character/chara_136b.png",
+            "resources/img/character/chara_140b.png",
+            "resources/img/character/chara_150b.png",
+            "resources/img/character/chara_152b.png",
+        ]
+        chars = list(acc.get("unlocked_characters") or [])
+        while len(chars) < min(10, int(acc.get("unlocked_count") or 1)):
+            chars.append(sample_pool[len(chars) % len(sample_pool)])
+
+        frame_num = 1 if int(self.auth_anim_tick * 3.0) % 2 == 0 else 2
+        cx = gal_box.x + 14
+        for c_path in chars[:10]:
+            c_card = pygame.Rect(cx, gal_box.y + 30, 52, 52)
+            pygame.draw.rect(self.screen, (255, 255, 255), c_card, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_BORDER, c_card, 1, border_radius=8)
+            sp = self._get_admin_char_sprite(c_path, frame_num, 42)
+            self.screen.blit(sp, (c_card.x + 5, c_card.y + 5))
+            cx += 62
+
+    def _draw_admin_part3_expanded(self, area: pygame.Rect, acc: dict):
+        self._draw_section_card_frame(area, "PHẦN 3. HOẠT ĐỘNG TÀI KHOẢN & THIẾT BỊ", "< VỀ 4 PHẦN", COLOR_STRIPE_B2, "all_4")
+        x = area.x + 12
+        y = area.y + 38
+        w = area.width - 24
+
+        self._draw_kv_row(x, y,      w, "1. Lần đăng nhập cuối:", acc.get("last_login_str", "--"), COLOR_TEXT_ORANGE)
+        self._draw_kv_row(x, y + 30, w, "2. Tổng số lần đăng nhập:", f"{acc.get('login_count', 1)} Lần đăng nhập", COLOR_PURPLE_BACK)
+        self._draw_kv_row(x, y + 60, w, "4. Thiết bị đăng nhập:", acc.get("last_device", "Web Browser (Tamaweb WASM)"), (25, 145, 75))
+
+        # Bảng 3. Lịch sử hoạt động chi tiết
+        log_hdr = pygame.Rect(x, y + 94, w, 22)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_ACTIVE, log_hdr, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, "THỜI GIAN", (90, 45, 10), log_hdr.x + 8, log_hdr.y + 4, 130)
+        self._draw_clipped_text(self.screen, self.font_xs, "3. LỊCH SỬ HOẠT ĐỘNG CHI TIẾT", (90, 45, 10), log_hdr.x + 150, log_hdr.y + 4, 310)
+        self._draw_clipped_text(self.screen, self.font_xs, "THIẾT BỊ", (90, 45, 10), log_hdr.right - 165, log_hdr.y + 4, 155)
+
+        acts = acc.get("activity_history") or []
+        ay = log_hdr.bottom + 4
+        for idx, act_item in enumerate(acts[:6]):
+            r_bg = (255, 248, 240) if idx % 2 == 0 else (255, 255, 255)
+            ar = pygame.Rect(x, ay, w, 24)
+            pygame.draw.rect(self.screen, r_bg, ar, border_radius=5)
+            pygame.draw.rect(self.screen, (240, 220, 195), ar, 1, border_radius=5)
+            self._draw_clipped_text(self.screen, self.font_xs, act_item.get("time_str", "--"), (110, 75, 45), ar.x + 8, ar.y + 4, 136)
+            self._draw_clipped_text(self.screen, self.font_xs, act_item.get("description", "--"), (40, 25, 10), ar.x + 150, ar.y + 4, 320)
+            self._draw_clipped_text(self.screen, self.font_xs, act_item.get("device", "--"), COLOR_PURPLE_BACK, ar.right - 165, ar.y + 4, 158)
+            ay += 27
+
+    def _draw_admin_part4_expanded(self, area: pygame.Rect, acc: dict):
+        self._draw_section_card_frame(area, "PHẦN 4. LỊCH SỬ XỬ LÝ & KHOÁ TÀI KHOẢN", "< VỀ 4 PHẦN", COLOR_STRIPE_B1, "all_4")
+        x = area.x + 12
+        y = area.y + 38
+        w = area.width - 24
+
+        st = acc.get("status", "active")
+        status_banner = pygame.Rect(x, y, w, 58)
+        pygame.draw.rect(self.screen, (255, 240, 242) if st == "locked" else (242, 255, 245), status_banner, border_radius=9)
+        pygame.draw.rect(self.screen, COLOR_RED if st == "locked" else (45, 175, 75), status_banner, 2, border_radius=9)
+
+        if st == "locked":
+            t1 = f"TÀI KHOẢN ĐANG BỊ KHOÁ  •  THỜI HẠN: {acc.get('lock_duration_label', 'Vĩnh viễn')} (MỞ LÚC: {acc.get('locked_until_str', '--')})"
+            t2 = f"Lý do khoá: {acc.get('lock_reason', '--')}  |  Người thực hiện: {acc.get('locked_by', 'admin').upper()}  |  Lúc: {acc.get('locked_at_str', '--')}"
+            self._draw_clipped_text(self.screen, self.font_xs, t1, COLOR_RED, status_banner.x + 10, status_banner.y + 8, w - 180)
+            self._draw_clipped_text(self.screen, self.font_xs, t2, (90, 30, 40), status_banner.x + 10, status_banner.y + 31, w - 180)
+            btn_act = pygame.Rect(status_banner.right - 162, status_banner.y + 13, 152, 32)
+            self._draw_3d_button(btn_act, "MỞ KHOÁ NGAY", (22, 168, 95), (255, 255, 255), (15, 120, 65), (10, 95, 50))
+            self.admin_click_areas.append((btn_act, lambda u=acc["username"]: self._exec_admin_unlock(u)))
+        else:
+            t1 = "TÀI KHOẢN ĐANG HOẠT ĐỘNG BÌNH THƯỜNG (KHÔNG BỊ KHOÁ)"
+            t2 = "Admin có thể khoá tài khoản, chọn lý do khoá và thiết lập thời hạn khoá bên phải."
+            self._draw_clipped_text(self.screen, self.font_xs, t1, (25, 145, 65), status_banner.x + 10, status_banner.y + 8, w - 180)
+            self._draw_clipped_text(self.screen, self.font_xs, t2, (80, 100, 85), status_banner.x + 10, status_banner.y + 31, w - 180)
+            btn_act = pygame.Rect(status_banner.right - 162, status_banner.y + 13, 152, 32)
+            self._draw_3d_button(btn_act, "KHOÁ TÀI KHOẢN", COLOR_RED, (255, 255, 255), (165, 20, 45), (130, 10, 35))
+            self.admin_click_areas.append((btn_act, lambda u=acc["username"]: self._open_admin_lock_modal(u)))
+
+        # Bảng lịch sử xử lý (1. Lịch sử khoá, 2. Lý do khoá, 3. Người thực hiện, 4. Thời gian xử lý)
+        hdr = pygame.Rect(x, y + 66, w, 24)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_ACTIVE, hdr, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, "4. THỜI GIAN XỬ LÝ", (90, 45, 10), hdr.x + 8, hdr.y + 4, 130)
+        self._draw_clipped_text(self.screen, self.font_xs, "1. THAO TÁC / THỜI HẠN", (90, 45, 10), hdr.x + 145, hdr.y + 4, 155)
+        self._draw_clipped_text(self.screen, self.font_xs, "2. LÝ DO KHOÁ / XỬ LÝ", (90, 45, 10), hdr.x + 308, hdr.y + 4, 240)
+        self._draw_clipped_text(self.screen, self.font_xs, "3. NGƯỜI THỰC HIỆN", (90, 45, 10), hdr.right - 115, hdr.y + 4, 110)
+
+        locks = acc.get("lock_history") or []
+        ly = hdr.bottom + 5
+        if not locks:
+            empty_s = self.font_xs.render("TÀI KHOẢN NÀY CHƯA CÓ LỊCH SỬ BỊ KHOÁ / XỬ LÝ VI PHẠM.", False, (130, 100, 75))
+            self.screen.blit(empty_s, (area.centerx - empty_s.get_width() // 2, ly + 45))
+        else:
+            for idx, lk in enumerate(locks[:7]):
+                lr = pygame.Rect(x, ly, w, 26)
+                is_lock_act = ("KHOÁ" in lk.get("action", "") and "MỞ" not in lk.get("action", ""))
+                pygame.draw.rect(self.screen, (255, 245, 246) if is_lock_act else (245, 255, 248), lr, border_radius=5)
+                pygame.draw.rect(self.screen, (235, 195, 200) if is_lock_act else (195, 230, 205), lr, 1, border_radius=5)
+
+                self._draw_clipped_text(self.screen, self.font_xs, lk.get("time_str", "--"), (95, 65, 40), lr.x + 8, lr.y + 5, 132)
+                act_dur = f"{lk.get('action', '')} ({lk.get('duration_label', '--')})"
+                self._draw_clipped_text(self.screen, self.font_xs, act_dur, COLOR_RED if is_lock_act else (20, 150, 65), lr.x + 145, lr.y + 5, 158)
+                self._draw_clipped_text(self.screen, self.font_xs, lk.get("reason", "--"), (40, 25, 15), lr.x + 308, lr.y + 5, 242)
+                self._draw_clipped_text(self.screen, self.font_xs, lk.get("performed_by", "admin").upper(), COLOR_PURPLE_BACK, lr.right - 105, lr.y + 5, 98)
+                ly += 29
+
+    def _draw_admin_locked_accounts_table(self, area: pygame.Rect):
+        """Hiển thị danh sách toàn bộ các tài khoản đang bị khoá kèm lý do, thời hạn và nút Mở khoá"""
+        locked_list = [a for a in self.admin_accounts if a.get("status") == "locked"]
+        self._draw_section_card_frame(
+            area,
+            f"DANH SÁCH TÀI KHOẢN ĐANG BỊ KHOÁ ({len(locked_list)} TÀI KHOẢN)",
+            "< VỀ 4 PHẦN",
+            COLOR_STRIPE_B1,
+            "all_4",
+        )
+        x = area.x + 10
+        y = area.y + 36
+        w = area.width - 20
+
+        hdr = pygame.Rect(x, y, w, 24)
+        pygame.draw.rect(self.screen, COLOR_SURFACE_ACTIVE, hdr, border_radius=6)
+        self._draw_clipped_text(self.screen, self.font_xs, "ID / USERNAME", (90, 45, 10), hdr.x + 8, hdr.y + 4, 125)
+        self._draw_clipped_text(self.screen, self.font_xs, "LÝ DO KHOÁ", (90, 45, 10), hdr.x + 138, hdr.y + 4, 210)
+        self._draw_clipped_text(self.screen, self.font_xs, "THỜI HẠN / MỞ LÚC", (90, 45, 10), hdr.x + 355, hdr.y + 4, 155)
+        self._draw_clipped_text(self.screen, self.font_xs, "NGƯỜI XỬ LÝ", (90, 45, 10), hdr.x + 515, hdr.y + 4, 80)
+        self._draw_clipped_text(self.screen, self.font_xs, "THAO TÁC", (90, 45, 10), hdr.right - 78, hdr.y + 4, 72)
+
+        ry = hdr.bottom + 6
+        if not locked_list:
+            msg = self.font_sm.render("HIỆN TẠI KHÔNG CÓ TÀI KHOẢN NÀO BỊ KHOÁ!", False, (25, 155, 65))
+            self.screen.blit(msg, (area.centerx - msg.get_width() // 2, area.centery - 10))
+            return
+
+        for acc in locked_list[:7]:
+            r_rect = pygame.Rect(x, ry, w, 38)
+            pygame.draw.rect(self.screen, (255, 244, 246), r_rect, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_RED, r_rect, 1, border_radius=8)
+
+            self._draw_clipped_text(self.screen, self.font_xs, f"#{acc['id']} {acc['username'].upper()}", COLOR_PURPLE_BACK, r_rect.x + 8, r_rect.y + 4, 125)
+            self._draw_clipped_text(self.screen, self.font_xs, f"Lúc: {acc.get('locked_at_str', '--')}", (120, 85, 65), r_rect.x + 8, r_rect.y + 20, 125)
+
+            self._draw_clipped_text(self.screen, self.font_xs, acc.get("lock_reason") or "Vi phạm quy định", COLOR_RED, r_rect.x + 138, r_rect.y + 11, 210)
+
+            dur_info = f"{acc.get('lock_duration_label', 'Vĩnh viễn')} ({acc.get('locked_until_str', '--')})"
+            self._draw_clipped_text(self.screen, self.font_xs, dur_info, (70, 35, 15), r_rect.x + 355, r_rect.y + 11, 155)
+
+            self._draw_clipped_text(self.screen, self.font_xs, (acc.get("locked_by") or "admin").upper(), COLOR_PURPLE_BACK, r_rect.x + 520, r_rect.y + 11, 75)
+
+            btn_unlk = pygame.Rect(r_rect.right - 86, r_rect.y + 6, 80, 26)
+            self._draw_3d_button(btn_unlk, "MỞ KHOÁ", (22, 168, 95), (255, 255, 255), (15, 120, 65), (10, 95, 50), radius=6)
+            uname_val = acc["username"]
+            self.admin_click_areas.append((btn_unlk, lambda u=uname_val: self._exec_admin_unlock(u)))
+            ry += 43
+
+    # =========================================================================
+    # VẼ HỘP THOẠI MODAL (KHOÁ TÀI KHOẢN / THÊM / SỬA / XOÁ)
+    # =========================================================================
+    def _draw_admin_modal_overlay(self):
+        dim = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+        dim.fill((35, 18, 8, 145))
+        self.screen.blit(dim, (0, 0))
+
+        if self.admin_modal == "lock":
+            self._draw_admin_lock_modal()
+        elif self.admin_modal in ("add", "edit"):
+            self._draw_admin_add_edit_modal()
+        elif self.admin_modal == "delete":
+            self._draw_admin_delete_modal()
+
+    def _draw_admin_lock_modal(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        mw, mh = 540, 410
+        mrect = pygame.Rect((WIN_W - mw) // 2, (WIN_H - mh) // 2, mw, mh)
+        pygame.draw.rect(self.screen, (80, 35, 15), mrect.move(0, 6), border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_SURFACE, mrect, border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_RED, mrect, 4, border_radius=16)
+
+        hdr = pygame.Rect(mrect.x + 12, mrect.y + 12, mw - 24, 38)
+        pygame.draw.rect(self.screen, COLOR_RED, hdr, border_radius=10)
+        self._draw_clipped_text(
+            self.screen,
+            self.font_md,
+            f"KHOÁ TÀI KHOẢN: @{acc['username'].upper()} (#{acc['id']})",
+            (255, 255, 255),
+            hdr.centerx,
+            hdr.y + 9,
+            mw - 40,
+            align="center",
+        )
+
+        # 1. Chọn nhanh Lý do khoá
+        lbl1 = self.font_xs.render("1. CHỌN NHANH HOẶC NHẬP LÝ DO KHOÁ TÀI KHOẢN:", False, COLOR_TEXT_ORANGE)
+        self.screen.blit(lbl1, (mrect.x + 20, mrect.y + 60))
+
+        preset_reasons = [
+            "Gian lận Coin & XP (Cheat/Hack)",
+            "Spam / Lạm dụng lỗi hệ thống",
+            "Vi phạm quy định cộng đồng",
+            "Tài khoản nghi vấn bảo mật",
+        ]
+        for idx, r_txt in enumerate(preset_reasons):
+            rx = mrect.x + 20 + (idx % 2) * 252
+            ry = mrect.y + 82 + (idx // 2) * 32
+            rb = pygame.Rect(rx, ry, 246, 27)
+            sel = (self.admin_form.get("lock_reason") == r_txt)
+            pygame.draw.rect(self.screen, COLOR_TEXT_ORANGE if sel else COLOR_SURFACE_SHADOW, rb, border_radius=7)
+            pygame.draw.rect(self.screen, COLOR_BORDER, rb, 2 if sel else 1, border_radius=7)
+            self._draw_clipped_text(self.screen, self.font_xs, r_txt, (255, 255, 255) if sel else (75, 40, 15), rb.centerx, rb.y + 5, 236, align="center")
+            self.admin_modal_click_areas.append((rb, lambda t=r_txt: self._set_lock_reason(t)))
+
+        # Ô nhập Lý do khoá tuỳ chỉnh
+        box_reason = pygame.Rect(mrect.x + 20, mrect.y + 152, mw - 40, 36)
+        blink = "|" if int(self.auth_anim_tick * 2.5) % 2 == 0 else ""
+        self._draw_auth_input_box(
+            box_reason,
+            text=self.admin_form.get("lock_reason", "") + blink,
+            placeholder="Nhập lý do khoá tài khoản...",
+            focused=True,
+            is_empty=(len(self.admin_form.get("lock_reason", "")) == 0),
+        )
+
+        # 2. Thiết lập thời hạn khoá
+        lbl2 = self.font_xs.render("2. THIẾT LẬP THỜI HẠN KHOÁ TÀI KHOẢN:", False, COLOR_TEXT_ORANGE)
+        self.screen.blit(lbl2, (mrect.x + 20, mrect.y + 202))
+
+        durations = [
+            ("1h", "1 GIỜ"),
+            ("24h", "24 GIỜ (1 NGÀY)"),
+            ("3d", "3 NGÀY"),
+            ("7d", "7 NGÀY"),
+            ("30d", "30 NGÀY"),
+            ("permanent", "VĨNH VIỄN"),
+        ]
+        for idx, (d_key, d_lbl) in enumerate(durations):
+            dx = mrect.x + 20 + (idx % 3) * 168
+            dy = mrect.y + 224 + (idx // 3) * 36
+            db = pygame.Rect(dx, dy, 160, 30)
+            sel = (self.admin_form.get("lock_duration_key") == d_key)
+            pygame.draw.rect(self.screen, COLOR_PURPLE_BACK if sel else COLOR_SURFACE_SHADOW, db, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_BORDER, db, 2 if sel else 1, border_radius=8)
+            self._draw_clipped_text(self.screen, self.font_xs, d_lbl, (255, 255, 255) if sel else (75, 40, 15), db.centerx, db.y + 7, 150, align="center")
+            self.admin_modal_click_areas.append((db, lambda k=d_key: self._set_lock_duration(k)))
+
+        info_line = f"Người thực hiện thao tác: ADMIN ({self.backend.user_id})  •  Ghi nhận tự động vào Phần 4 (Lịch sử xử lý)"
+        self._draw_clipped_text(self.screen, self.font_xs, info_line, (110, 75, 45), mrect.centerx, mrect.y + 308, mw - 40, align="center")
+
+        btn_confirm = pygame.Rect(mrect.x + 20, mrect.bottom - 58, 310, 42)
+        btn_cancel = pygame.Rect(btn_confirm.right + 12, mrect.bottom - 58, 178, 42)
+        self._draw_3d_button(btn_confirm, "XÁC NHẬN KHOÁ TÀI KHOẢN", COLOR_RED, (255, 255, 255), (165, 20, 45), (125, 10, 30), font=self.font_sm, radius=10)
+        self._draw_3d_button(btn_cancel, "HUỶ BỎ", COLOR_SURFACE_SHADOW, COLOR_TEXT_ORANGE, font=self.font_sm, radius=10)
+        self.admin_modal_click_areas.append((btn_confirm, self._submit_admin_lock))
+        self.admin_modal_click_areas.append((btn_cancel, self._close_admin_modal))
+
+    def _draw_admin_add_edit_modal(self):
+        is_add = (self.admin_modal == "add")
+        mw, mh = 580, 468
+        mrect = pygame.Rect((WIN_W - mw) // 2, (WIN_H - mh) // 2, mw, mh)
+        pygame.draw.rect(self.screen, (80, 35, 15), mrect.move(0, 6), border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_SURFACE, mrect, border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_BORDER, mrect, 4, border_radius=16)
+
+        hdr = pygame.Rect(mrect.x + 12, mrect.y + 12, mw - 24, 36)
+        pygame.draw.rect(self.screen, COLOR_GREEN if is_add else COLOR_TEXT_ORANGE, hdr, border_radius=10)
+        h_title = "THÊM TÀI KHOẢN NGƯỜI CHƠI MỚI" if is_add else f"CHỈNH SỬA TÀI KHOẢN: @{self.admin_selected_username.upper()}"
+        self._draw_clipped_text(self.screen, self.font_md, h_title, (255, 255, 255), hdr.centerx, hdr.y + 8, mw - 36, align="center")
+
+        fields = [
+            (0, "username",       "1. TÀI KHOẢN (USERNAME):",      is_add),
+            (1, "password",       "2. MẬT KHẨU (PASSWORD):",       True),
+            (2, "level",          "3. LEVEL HIỆN TẠI:",            True),
+            (3, "total_xp",       "4. TỔNG ĐIỂM XP:",              True),
+            (4, "gold",           "5. TỔNG COIN ($):",             True),
+            (5, "unlocked_count", "6. SỐ NHÂN VẬT MỞ KHOÁ:",       True),
+            (6, "streak_days",    "7. CHUỖI NGÀY DUY TRÌ:",        True),
+            (7, "last_device",    "8. THIẾT BỊ ĐĂNG NHẬP:",        True),
+        ]
+
+        blink = "|" if int(self.auth_anim_tick * 2.5) % 2 == 0 else ""
+        for idx, f_key, f_lbl, editable in fields:
+            col_i = idx % 2
+            row_i = idx // 2
+            fx = mrect.x + 20 + col_i * 276
+            fy = mrect.y + 58 + row_i * 68
+
+            self._draw_clipped_text(self.screen, self.font_xs, f_lbl, COLOR_TEXT_ORANGE, fx, fy, 260)
+            box = pygame.Rect(fx, fy + 18, 264, 34)
+            focused = (self.admin_modal_focus == idx and editable)
+            val_str = str(self.admin_form.get(f_key, ""))
+            pygame.draw.rect(self.screen, (255, 255, 255) if editable else (240, 232, 222), box, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_PURPLE_BACK if focused else COLOR_BORDER, box, 3 if focused else 2, border_radius=8)
+            self._draw_clipped_text(self.screen, self.font_sm, val_str + (blink if focused else ""), (35, 20, 10), box.x + 10, box.y + 7, box.width - 20)
+            if editable:
+                self.admin_modal_click_areas.append((box, lambda i=idx: self._set_admin_modal_focus(i)))
+
+        # Chọn trạng thái tài khoản
+        st_y = mrect.y + 338
+        self._draw_clipped_text(self.screen, self.font_xs, "9. TRẠNG THÁI TÀI KHOẢN:", COLOR_TEXT_ORANGE, mrect.x + 20, st_y, 220)
+        for idx, (st_key, st_lbl, st_col) in enumerate([
+            ("active", "ĐANG HOẠT ĐỘNG", (35, 165, 65)),
+            ("inactive", "KHÔNG HOẠT ĐỘNG", (140, 110, 85)),
+            ("locked", "TÀI KHOẢN BỊ KHOÁ", COLOR_RED),
+        ]):
+            sb = pygame.Rect(mrect.x + 20 + idx * 182, st_y + 20, 174, 30)
+            sel = (self.admin_form.get("status") == st_key)
+            pygame.draw.rect(self.screen, st_col if sel else COLOR_SURFACE_SHADOW, sb, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_BORDER, sb, 2 if sel else 1, border_radius=8)
+            self._draw_clipped_text(self.screen, self.font_xs, st_lbl, (255, 255, 255) if sel else (75, 40, 15), sb.centerx, sb.y + 7, 164, align="center")
+            self.admin_modal_click_areas.append((sb, lambda s=st_key: self._set_form_status(s)))
+
+        btn_save = pygame.Rect(mrect.x + 20, mrect.bottom - 56, 340, 40)
+        btn_cancel = pygame.Rect(btn_save.right + 12, mrect.bottom - 56, 188, 40)
+        self._draw_3d_button(btn_save, "LƯU THÔNG TIN TÀI KHOẢN", COLOR_GREEN, (255, 255, 255), (35, 135, 25), (25, 100, 15), font=self.font_sm, radius=10)
+        self._draw_3d_button(btn_cancel, "HUỶ BỎ", COLOR_SURFACE_SHADOW, COLOR_TEXT_ORANGE, font=self.font_sm, radius=10)
+        self.admin_modal_click_areas.append((btn_save, self._submit_admin_add_or_edit))
+        self.admin_modal_click_areas.append((btn_cancel, self._close_admin_modal))
+
+    def _draw_admin_delete_modal(self):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        mw, mh = 460, 230
+        mrect = pygame.Rect((WIN_W - mw) // 2, (WIN_H - mh) // 2, mw, mh)
+        pygame.draw.rect(self.screen, (80, 35, 15), mrect.move(0, 6), border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_SURFACE, mrect, border_radius=16)
+        pygame.draw.rect(self.screen, COLOR_RED, mrect, 4, border_radius=16)
+
+        self._draw_clipped_text(self.screen, self.font_md, "XÁC NHẬN XOÁ TÀI KHOẢN?", COLOR_RED, mrect.centerx, mrect.y + 22, mw - 30, align="center")
+        self._draw_clipped_text(
+            self.screen,
+            self.font_sm,
+            f"Tài khoản: @{acc['username'].upper()} (ID #{acc['id']})",
+            COLOR_PURPLE_BACK,
+            mrect.centerx,
+            mrect.y + 62,
+            mw - 30,
+            align="center",
+        )
+        self._draw_clipped_text(
+            self.screen,
+            self.font_xs,
+            "Toàn bộ dữ liệu cá nhân, thú cưng, coin và lịch sử sẽ bị xoá vĩnh viễn!",
+            (95, 55, 30),
+            mrect.centerx,
+            mrect.y + 98,
+            mw - 30,
+            align="center",
+        )
+
+        btn_yes = pygame.Rect(mrect.x + 24, mrect.bottom - 62, 230, 42)
+        btn_no = pygame.Rect(btn_yes.right + 14, mrect.bottom - 62, 168, 42)
+        self._draw_3d_button(btn_yes, "XÁC NHẬN XOÁ", COLOR_RED, (255, 255, 255), (165, 20, 45), (125, 10, 30), font=self.font_sm, radius=10)
+        self._draw_3d_button(btn_no, "HUỶ BỎ", COLOR_SURFACE_SHADOW, COLOR_TEXT_ORANGE, font=self.font_sm, radius=10)
+        self.admin_modal_click_areas.append((btn_yes, self._submit_admin_delete))
+        self.admin_modal_click_areas.append((btn_no, self._close_admin_modal))
+
+    def _toggle_locked_accounts_view(self):
+        self.sound.play("click")
+        if self.admin_detail_tab == "locked_list":
+            self.admin_detail_tab = "all_4"
+            self.admin_filter = "all"
+        else:
+            self.admin_detail_tab = "locked_list"
+            self.admin_filter = "locked"
+            self.admin_page = 0
+
+    def _manual_refresh_admin(self):
+        self.sound.play("confirm")
+        self._refresh_admin_dashboard(keep_selection=True)
+        self._set_admin_notice("ĐÃ LÀM MỚI DỮ LIỆU TÀI KHOẢN TỪ HỆ THỐNG!", COLOR_GREEN)
+
+    def _focus_admin_search(self):
+        self.sound.play("click")
+        self.admin_search_focused = True
+
+    def _clear_admin_search(self):
+        self.sound.play("click")
+        self.admin_search_query = ""
+        self.admin_search_focused = False
+        self.admin_page = 0
+
+    def _change_admin_page(self, delta: int):
+        self.sound.play("click")
+        filtered = self._get_filtered_admin_accounts()
+        total_pages = max(1, (len(filtered) + 6) // 7)
+        self.admin_page = max(0, min(total_pages - 1, self.admin_page + delta))
+
+    def _toggle_admin_user_pw(self):
+        self.sound.play("click")
+        self.admin_show_user_pw = not self.admin_show_user_pw
+
+    def _quick_set_status(self, new_status: str):
+        acc = self._get_selected_admin_account()
+        if not acc:
+            return
+        if acc["username"] == "admin" and new_status != "active":
+            self.sound.play("refuse")
+            self._set_admin_notice("KHÔNG THỂ ĐỔI TRẠNG THÁI CỦA ADMIN GỐC!", COLOR_RED)
+            return
+        ok, msg, _ = self.backend.admin_update_account(acc["username"], {"status": new_status})
+        if ok:
+            self.sound.play("confirm")
+            self._refresh_admin_dashboard(keep_selection=True)
+            self._set_admin_notice(msg, COLOR_GREEN)
+
+    def _set_lock_reason(self, reason: str):
+        self.sound.play("click")
+        self.admin_form["lock_reason"] = reason
+
+    def _set_lock_duration(self, d_key: str):
+        self.sound.play("click")
+        self.admin_form["lock_duration_key"] = d_key
+
+    def _set_admin_modal_focus(self, idx: int):
+        self.sound.play("click")
+        self.admin_modal_focus = idx
+
+    def _set_form_status(self, st: str):
+        self.sound.play("click")
+        self.admin_form["status"] = st
+
+    def _handle_admin_keydown(self, event: pygame.event.Event):
+        if self.admin_modal == "lock":
+            if event.key == pygame.K_ESCAPE:
+                self._close_admin_modal()
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._submit_admin_lock()
+            elif event.key == pygame.K_BACKSPACE:
+                self.sound.play("click")
+                self.admin_form["lock_reason"] = self.admin_form.get("lock_reason", "")[:-1]
+            else:
+                ch = event.unicode
+                if ch and ch.isprintable() and ch not in ("\r", "\n", "\t") and len(self.admin_form.get("lock_reason", "")) < 48:
+                    self.sound.play("click")
+                    self.admin_form["lock_reason"] = self.admin_form.get("lock_reason", "") + ch
+            return
+
+        if self.admin_modal in ("add", "edit"):
+            field_keys = ["username", "password", "level", "total_xp", "gold", "unlocked_count", "streak_days", "last_device"]
+            numeric_keys = {"level", "total_xp", "gold", "unlocked_count", "streak_days"}
+            min_idx = 0 if self.admin_modal == "add" else 1
+            if self.admin_modal_focus < min_idx:
+                self.admin_modal_focus = min_idx
+            cur_key = field_keys[self.admin_modal_focus % len(field_keys)]
+
+            if event.key == pygame.K_ESCAPE:
+                self._close_admin_modal()
+            elif event.key == pygame.K_TAB:
+                self.sound.play("click")
+                nxt = (self.admin_modal_focus + 1) % len(field_keys)
+                if nxt < min_idx:
+                    nxt = min_idx
+                self.admin_modal_focus = nxt
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._submit_admin_add_or_edit()
+            elif event.key == pygame.K_BACKSPACE:
+                self.sound.play("click")
+                self.admin_form[cur_key] = str(self.admin_form.get(cur_key, ""))[:-1]
+            else:
+                ch = event.unicode
+                if ch and ch.isprintable() and ch not in ("\r", "\n", "\t"):
+                    if cur_key in numeric_keys and not ch.isdigit():
+                        return
+                    if len(str(self.admin_form.get(cur_key, ""))) < 28:
+                        self.sound.play("click")
+                        self.admin_form[cur_key] = str(self.admin_form.get(cur_key, "")) + ch
+            return
+
+        if self.admin_modal == "delete":
+            if event.key == pygame.K_ESCAPE:
+                self._close_admin_modal()
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._submit_admin_delete()
+            return
+
+        if self.admin_search_focused:
+            if event.key == pygame.K_ESCAPE:
+                self.admin_search_focused = False
+            elif event.key == pygame.K_BACKSPACE:
+                self.sound.play("click")
+                self.admin_search_query = self.admin_search_query[:-1]
+                self.admin_page = 0
+            else:
+                ch = event.unicode
+                if ch and ch.isprintable() and ch not in ("\r", "\n", "\t") and len(self.admin_search_query) < 24:
+                    self.sound.play("click")
+                    self.admin_search_query += ch
+                    self.admin_page = 0
+            return
+
+        # Phím tắt điều hướng danh sách tài khoản bằng mũi tên Lên / Xuống
+        filtered = self._get_filtered_admin_accounts()
+        if not filtered:
+            return
+        usernames = [a["username"] for a in filtered]
+        cur_idx = usernames.index(self.admin_selected_username) if self.admin_selected_username in usernames else 0
+        if event.key == pygame.K_DOWN:
+            self.sound.play("click")
+            new_idx = min(len(usernames) - 1, cur_idx + 1)
+            self.admin_selected_username = usernames[new_idx]
+            self.admin_page = new_idx // 7
+        elif event.key == pygame.K_UP:
+            self.sound.play("click")
+            new_idx = max(0, cur_idx - 1)
+            self.admin_selected_username = usernames[new_idx]
+            self.admin_page = new_idx // 7
 
     def _draw_auth_screen(self):
         self.auth_click_areas.clear()
@@ -2315,10 +3835,21 @@ class TamawebApp:
         if not self.is_authenticated:
             for rect, cb in self.auth_click_areas:
                 if rect.collidepoint(pos):
-                    try:
+                    cb()
+                    return
+            return
+
+        if self.is_admin_mode and self.backend.user_id == "admin" and self.backend.role == "admin":
+            if self.admin_modal:
+                for rect, cb in self.admin_modal_click_areas:
+                    if rect.collidepoint(pos):
                         cb()
-                    except Exception as e:
-                        print("Auth click error:", e)
+                        return
+                return
+            self.admin_search_focused = False
+            for rect, cb in self.admin_click_areas:
+                if rect.collidepoint(pos):
+                    cb()
                     return
             return
 
@@ -2394,18 +3925,17 @@ class TamawebApp:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    try:
-                        self.handle_click(event.pos)
-                    except Exception as e:
-                        print("Click error:", e)
+                    self.handle_click(event.pos)
+                elif event.type == pygame.MOUSEWHEEL:
+                    if self.is_authenticated and self.is_admin_mode and not self.admin_modal:
+                        self._change_admin_page(-1 if event.y > 0 else 1)
                 elif event.type == pygame.KEYDOWN:
-                    try:
-                        if not self.is_authenticated:
-                            self._handle_auth_keydown(event)
-                        else:
-                            self.handle_keydown(event.key)
-                    except Exception as e:
-                        print("Key error:", e)
+                    if not self.is_authenticated:
+                        self._handle_auth_keydown(event)
+                    elif self.is_admin_mode and self.backend.user_id == "admin" and self.backend.role == "admin":
+                        self._handle_admin_keydown(event)
+                    else:
+                        self.handle_keydown(event.key)
 
             self.update(dt)
             self.draw()
