@@ -1014,6 +1014,7 @@ def _build_rich_account_dict(user_row: Dict[str, Any], pet_map: Dict[str, Dict[s
         "admin_update": "Quản trị viên cập nhật thông tin",
         "admin_lock": "Quản trị viên khoá tài khoản",
         "admin_unlock": "Quản trị viên mở khoá tài khoản",
+        "anti_cheat_alert": "Cảnh báo Anti-Cheat: Dữ liệu bất thường",
     }
     for act in raw_acts[:15]:
         payload = {}
@@ -1548,6 +1549,118 @@ def unlock_user_account(
         "desc": f"Được mở khoá bởi {performed_by}",
     })
     return True, f"ĐÃ MỞ KHOÁ TÀI KHOẢN '{uname.upper()}'!"
+
+
+def validate_pet_save_anti_cheat(data: Dict[str, Any]) -> Tuple[bool, str]:
+    """Kiểm tra chống gian lận tự động (Anti-Cheat) phía Server trước khi lưu trạng thái thú cưng"""
+    user_id = str(data.get("user_id", "guest_1")).strip().lower()
+    if user_id in ("", "guest_1", "player_1", "admin"):
+        return True, "OK"
+
+    now = time.time()
+    gold = int(data.get("gold", 0))
+    exp = int(data.get("exp", 0))
+    level = int(data.get("level", 1))
+    age_seconds = int(data.get("age_seconds", 0))
+
+    if gold < 0 or exp < 0 or level < 1 or age_seconds < 0:
+        reason = f"Chỉ số âm hoặc không hợp lệ (gold={gold}, exp={exp}, level={level}, age={age_seconds})"
+        _record_anti_cheat_violation(user_id, reason, severe=False)
+        return False, f"CẢNH BÁO ANTI-CHEAT: {reason}"
+
+    # Kiểm tra tài khoản có đang bị khoá không
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM users WHERE username = ?", (user_id,))
+    u_row = cur.fetchone()
+    conn.close()
+    if u_row and str(u_row["status"]).lower() == "locked":
+        return False, "TÀI KHOẢN ĐANG BỊ KHOÁ, KHÔNG THỂ LƯU DỮ LIỆU!"
+
+    prev = get_pet_data(user_id)
+    if not prev:
+        # Lần lưu đầu tiên: kiểm tra ngưỡng khởi tạo hợp lý
+        if gold > 5000 or exp > 5000 or level > 10:
+            reason = f"Tạo mới với chỉ số bất thường (gold={gold}, exp={exp}, level={level})"
+            _record_anti_cheat_violation(user_id, reason, severe=(gold > 50000 or exp > 50000))
+            return False, f"CẢNH BÁO ANTI-CHEAT: {reason}"
+        return True, "OK"
+
+    prev_updated = float(prev.get("updated_at") or now)
+    dt = max(1.0, now - prev_updated)
+    prev_gold = int(prev.get("gold") or 0)
+    prev_exp = int(prev.get("exp") or 0)
+    prev_level = int(prev.get("level") or 1)
+    prev_age = int(prev.get("age_seconds") or 0)
+
+    delta_gold = gold - prev_gold
+    delta_exp = exp - prev_exp
+    delta_level = level - prev_level
+    delta_age = age_seconds - prev_age
+
+    max_gold_gain = max(1500, int(dt * 60))
+    max_exp_gain = max(1000, int(dt * 40))
+
+    reason = ""
+    severe = False
+    if delta_gold > max_gold_gain:
+        reason = f"Tăng +{delta_gold} Coin trong {int(dt)}s (giới hạn {max_gold_gain})"
+        severe = delta_gold > 50000
+    elif delta_exp > max_exp_gain:
+        reason = f"Tăng +{delta_exp} XP trong {int(dt)}s (giới hạn {max_exp_gain})"
+        severe = delta_exp > 50000
+    elif delta_level > 5 and dt < 120:
+        reason = f"Tăng +{delta_level} Level quá nhanh trong {int(dt)}s"
+        severe = delta_level > 20
+    elif delta_age < -5 or delta_age > int(dt) + 300:
+        reason = f"Can thiệp thời gian tuổi thú cưng (delta_age={delta_age}s / dt={int(dt)}s)"
+
+    if reason:
+        _record_anti_cheat_violation(user_id, reason, severe=severe)
+        return False, f"CẢNH BÁO ANTI-CHEAT: {reason}"
+
+    return True, "OK"
+
+
+def _record_anti_cheat_violation(user_id: str, reason: str, severe: bool = False):
+    now = time.time()
+    log_analytics(user_id, "anti_cheat_alert", {
+        "reason": reason,
+        "severe": severe,
+        "desc": f"CẢNH BÁO ANTI-CHEAT: {reason}",
+    })
+
+    # Nếu vi phạm nghiêm trọng hoặc lặp lại >= 3 lần trong 10 phút -> Tự động khoá 24 Giờ
+    should_lock = severe
+    if not should_lock:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM analytics WHERE user_id = ? AND event_name = 'anti_cheat_alert' AND created_at >= ?",
+            (user_id, now - 600),
+        )
+        cnt = cur.fetchone()[0]
+        conn.close()
+        if cnt >= 3:
+            should_lock = True
+
+    if should_lock:
+        lock_user_account(
+            user_id,
+            reason=f"Hệ thống Anti-Cheat tự động khoá: {reason}",
+            duration_key="24h",
+            performed_by="system (anti-cheat)",
+        )
+
+
+def save_pet_data_checked(data: Dict[str, Any]) -> Tuple[bool, str, bool]:
+    """Kiểm tra Anti-Cheat trước khi lưu. Trả về (ok, message, flagged_cheat)."""
+    ok_ac, msg_ac = validate_pet_save_anti_cheat(data)
+    if not ok_ac:
+        return False, msg_ac, True
+    saved = save_pet_data(data)
+    return saved, ("Đã lưu thành công lên Cloud" if saved else "Lỗi lưu dữ liệu"), False
 
 
 def save_pet_data(data: Dict[str, Any]) -> bool:

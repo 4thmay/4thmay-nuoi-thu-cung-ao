@@ -19,6 +19,7 @@ from database import (
     logout_user,
     list_users,
     save_pet_data,
+    save_pet_data_checked,
     get_pet_data,
     get_top_leaderboard,
     log_analytics,
@@ -255,10 +256,12 @@ def api_admin_unlock_account(req: AdminUnlockRequest):
 
 @app.post("/api/pet/save")
 def api_save_pet(pet_data: PetSaveRequest):
-    success = save_pet_data(pet_data.model_dump())
+    success, msg, flagged = save_pet_data_checked(pet_data.model_dump())
+    if flagged:
+        raise HTTPException(status_code=403, detail=msg)
     if not success:
         raise HTTPException(status_code=500, detail="Lỗi khi lưu trạng thái thú cưng")
-    return {"status": "success", "message": "Đã lưu thành công lên Cloud"}
+    return {"status": "success", "message": msg}
 
 
 @app.get("/api/pet/load/{user_id}")
